@@ -13,7 +13,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
-pub const COOKIE: &str = "rustle_session";
+// `__Host-` pins the cookie to this exact host over HTTPS: a sibling subdomain (a tenant app) cannot plant one.
+pub const COOKIE: &str = "__Host-rustle_session";
 pub const SESSION_SECS: i64 = 12 * 3600;
 const HEADER_B64: &str = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9"; // {"alg":"HS256","typ":"JWT"}
 
@@ -32,6 +33,8 @@ pub struct AuthState {
     backoff: Mutex<HashMap<String, (u32, i64)>>,
     /// Argon2 allocates ~8 MiB per hash; never run two at once.
     pub hash_gate: tokio::sync::Semaphore,
+    /// Bounds how many requests may be waiting for `hash_gate`.
+    pub hash_queue: tokio::sync::Semaphore,
     hooks: RateLimiter,
 }
 
@@ -42,6 +45,7 @@ impl AuthState {
             csrf_key: key.derive("csrf"),
             backoff: Mutex::new(HashMap::new()),
             hash_gate: tokio::sync::Semaphore::new(1),
+            hash_queue: tokio::sync::Semaphore::new(4),
             hooks: RateLimiter::default(),
         }
     }
@@ -87,12 +91,21 @@ impl AuthState {
         }
     }
 
-    pub fn login_failed(&self, ip: &str, at: i64) {
+    /// Records a failure and returns how many consecutive failures this client has.
+    pub fn login_failed(&self, ip: &str, at: i64) -> u32 {
         let mut m = self.backoff.lock().unwrap_or_else(|p| p.into_inner());
-        if m.len() >= 1024 {
+        if m.len() >= 1024 && !m.contains_key(ip) {
             m.retain(|_, (_, next)| *next > at);
             if m.len() >= 1024 {
-                m.clear(); // pathological flood: forget everything rather than grow
+                // Still full of live penalties: evict the entry closest to expiry instead of
+                // forgetting everyone (a flood must not reset an abuser's own penalty).
+                if let Some(k) = m
+                    .iter()
+                    .min_by_key(|(_, (_, next))| *next)
+                    .map(|(k, _)| k.clone())
+                {
+                    m.remove(&k);
+                }
             }
         }
         let e = m.entry(ip.to_string()).or_insert((0, 0));
@@ -104,6 +117,7 @@ impl AuthState {
             (1i64 << (e.0 - 3).min(10)).min(900)
         };
         e.1 = at + delay;
+        e.0
     }
 
     pub fn login_ok(&self, ip: &str) {
@@ -148,7 +162,20 @@ pub fn client_ip(h: &HeaderMap) -> String {
         .and_then(|v| v.rsplit(',').next())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty() && s.len() < 64)
+        .map(|s| normalize_ip(&s))
         .unwrap_or_else(|| "local".into())
+}
+
+/// IPv6 clients rotate freely inside their /64, so rate-limit the whole prefix.
+pub fn normalize_ip(ip: &str) -> String {
+    if !ip.contains(':') || ip.contains('.') {
+        return ip.to_string(); // IPv4, or an IPv4-mapped form
+    }
+    let Ok(v6) = ip.parse::<std::net::Ipv6Addr>() else {
+        return ip.to_string();
+    };
+    let s = v6.segments();
+    format!("{:x}:{:x}:{:x}:{:x}::/64", s[0], s[1], s[2], s[3])
 }
 
 pub fn cookie_value(h: &HeaderMap, name: &str) -> Option<String> {
@@ -295,6 +322,16 @@ mod tests {
             a.login_failed("1.2.3.4", 100);
         }
         assert_eq!(a.login_wait("1.2.3.4", 100), 900, "capped at 15 minutes");
+        // a flood of distinct addresses cannot grow the table or reset an abuser's penalty
+        for i in 0..2000 {
+            a.login_failed(&format!("10.1.{}.{}", i / 250, i % 250), 100);
+        }
+        assert!(a.backoff.lock().unwrap().len() <= 1024);
+        assert_eq!(
+            a.login_wait("1.2.3.4", 100),
+            900,
+            "the abuser is still penalized after the flood"
+        );
         a.login_ok("1.2.3.4");
         assert_eq!(a.login_wait("1.2.3.4", 100), 0);
     }
@@ -320,12 +357,28 @@ mod tests {
             "203.0.113.5",
             "client-supplied prefix is ignored"
         );
+        h.insert(
+            "x-forwarded-for",
+            "2001:db8:1:2:aaaa:bbbb:cccc:dddd".parse().unwrap(),
+        );
+        assert_eq!(
+            client_ip(&h),
+            "2001:db8:1:2::/64",
+            "IPv6 is limited per /64"
+        );
+        assert_eq!(
+            normalize_ip("2001:db8:1:2:1::1"),
+            normalize_ip("2001:db8:1:2:ffff::2")
+        );
     }
 
     #[test]
     fn cookie_parsing() {
         let mut h = HeaderMap::new();
-        h.insert("cookie", "a=1; rustle_session=tok; b=2".parse().unwrap());
+        h.insert(
+            "cookie",
+            "a=1; __Host-rustle_session=tok; b=2".parse().unwrap(),
+        );
         assert_eq!(cookie_value(&h, COOKIE).as_deref(), Some("tok"));
         assert!(cookie_value(&h, "zzz").is_none());
         let c = session_cookie("t");

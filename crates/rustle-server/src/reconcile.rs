@@ -56,7 +56,11 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
     if let Err(e) = state.gateway.ensure_base(&base_params(state)).await {
         return Some(format!("gateway unreachable: {e}"));
     }
-    let sites = state.store.list_sites().unwrap_or_default();
+    // A failed read must abort the pass: treating "could not read" as "no sites" would delete every route.
+    let sites = match state.store.list_sites() {
+        Ok(s) => s,
+        Err(e) => return Some(format!("database error: {}", e.message)),
+    };
     let present: HashSet<String> = match state.gateway.site_ids().await {
         Ok(v) => v.into_iter().collect(),
         Err(e) => return Some(format!("gateway unreachable: {e}")),
@@ -89,30 +93,48 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
             .remove_site(id.trim_start_matches("site-"))
             .await;
     }
+    remove_orphan_containers(state, full).await;
     if full {
-        remove_orphan_containers(state).await;
+        start_current_containers(state).await;
     }
     None
 }
 
-/// Containers we created that no deployment refers to. Skipped while any deployment runs, since
-/// a half-finished deployment legitimately has a container the database does not point at yet.
-async fn remove_orphan_containers(state: &AppState) {
-    if state.deployer.any_busy() {
-        return;
-    }
+/// Containers we created that no deployment refers to; with `apps == false` only exited one-shot
+/// containers are swept. Nothing is deleted unless the database could be read completely, and a
+/// container that belongs to a site with a deployment in flight is never touched.
+async fn remove_orphan_containers(state: &AppState, apps: bool) {
     let Ok(list) = state.runtime.list_containers(Some("rustle.managed")).await else {
         return;
     };
     let mut keep: HashSet<String> = HashSet::new();
-    for s in state.store.list_sites().unwrap_or_default() {
-        if let Some(c) = s
-            .current_deployment_id
-            .as_deref()
-            .and_then(|d| state.store.get_deployment(d).ok().flatten())
-            .and_then(|d| d.container_id)
-        {
-            keep.insert(c);
+    if apps {
+        let sites = match state.store.list_sites() {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::error!("orphan cleanup skipped, cannot read sites: {}", e.message);
+                return;
+            }
+        };
+        for s in &sites {
+            let Some(did) = s.current_deployment_id.as_deref() else {
+                continue;
+            };
+            match state.store.get_deployment(did) {
+                Ok(Some(d)) => {
+                    if let Some(c) = d.container_id {
+                        keep.insert(c);
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => {
+                    tracing::error!(
+                        "orphan cleanup skipped, cannot read deployments: {}",
+                        e.message
+                    );
+                    return;
+                }
+            }
         }
     }
     for c in list {
@@ -122,7 +144,13 @@ async fn remove_orphan_containers(state: &AppState) {
             .map(String::as_str)
             .unwrap_or("");
         let owned = c.labels.get("rustle.managed").map(String::as_str) == Some("1");
-        if owned && kind == "app" && !keep.contains(&c.id) {
+        if apps && owned && kind == "app" && !keep.contains(&c.id) {
+            if c.labels
+                .get("rustle.site")
+                .is_some_and(|id| state.deployer.is_busy(id))
+            {
+                continue; // a deployment owns this container right now
+            }
             tracing::warn!("removing orphan container {}", c.name);
             let _ = state
                 .runtime
@@ -135,12 +163,40 @@ async fn remove_orphan_containers(state: &AppState) {
     }
 }
 
+/// After a crash or reboot in the middle of a stop-first deployment the live container is stopped
+/// on purpose (and `unless-stopped` will not restart it). Bring it back unless the operator stopped it.
+async fn start_current_containers(state: &AppState) {
+    let Ok(sites) = state.store.list_sites() else {
+        return;
+    };
+    for s in sites {
+        if s.status == "stopped" || state.deployer.is_busy(&s.id) {
+            continue;
+        }
+        let Some(cid) = s
+            .current_deployment_id
+            .as_deref()
+            .and_then(|d| state.store.get_deployment(d).ok().flatten())
+            .and_then(|d| d.container_id)
+        else {
+            continue;
+        };
+        if let Ok(info) = state.runtime.inspect(&cid).await {
+            if !info.running {
+                tracing::warn!("restarting {} (it was left stopped)", s.name);
+                let _ = state.runtime.start(&cid).await;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::app::TestEnv;
     use crate::caddy::Gateway;
     use crate::deploy::webhook;
+    use crate::docker::Runtime;
     use crate::sites::create_site;
     use rustle_types::CreateSiteReq;
 
@@ -231,6 +287,56 @@ mod tests {
             "containers Rustle did not create are never touched"
         );
         assert_eq!(ids.len(), 2, "current app container + foreign");
+    }
+
+    #[tokio::test]
+    async fn boot_restarts_a_current_container_left_stopped_by_an_interrupted_deploy() {
+        let e = TestEnv::new();
+        let s = mk(&e, "blog").await;
+        webhook(&e.state, &s, "ghcr.io/o/blog:1").unwrap();
+        e.state.deployer.wait_idle(&s.id).await;
+        let cid = e.runtime.containers()[0].id.clone();
+        e.runtime.stop(&cid, 1).await.unwrap(); // stop-first stopped it, then the process died
+        boot(&e.state).await;
+        assert!(
+            e.runtime
+                .containers()
+                .iter()
+                .find(|c| c.id == cid)
+                .unwrap()
+                .running
+        );
+        // an operator-stopped site stays stopped
+        e.runtime.stop(&cid, 1).await.unwrap();
+        e.state.store.set_site_status(&s.id, "stopped").unwrap();
+        boot(&e.state).await;
+        assert!(
+            !e.runtime
+                .containers()
+                .iter()
+                .find(|c| c.id == cid)
+                .unwrap()
+                .running
+        );
+    }
+
+    #[tokio::test]
+    async fn periodic_pass_only_sweeps_exited_oneshots_never_app_containers() {
+        let e = TestEnv::new();
+        let s = mk(&e, "blog").await;
+        let app = e.runtime.add_foreign_container(
+            "rustle-blog-x",
+            &[
+                ("rustle.managed", "1"),
+                ("rustle.kind", "app"),
+                ("rustle.site", &s.id),
+            ],
+        );
+        sync(&e.state, false).await;
+        assert!(
+            e.runtime.containers().iter().any(|c| c.id == app),
+            "orphan app removal is a boot-time action"
+        );
     }
 
     #[tokio::test]

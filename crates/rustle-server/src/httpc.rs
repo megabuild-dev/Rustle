@@ -55,7 +55,8 @@ impl Target {
     fn host_header(&self) -> String {
         match self {
             Target::Tcp(a) => a.clone(),
-            Target::Unix(_) => "localhost".into(),
+            // Caddy's admin endpoint rejects any Host other than "", 127.0.0.1 or ::1 (DNS-rebinding guard).
+            Target::Unix(_) => "127.0.0.1".into(),
             Target::Tls(h, _) => h.clone(),
         }
     }
@@ -254,6 +255,53 @@ pub async fn send(target: &Target, r: &Req, timeout: Duration) -> Result<Resp, H
         .map_err(|_| HttpError::Timeout)?
 }
 
+/// Like [`send`] but stops reading after `cap` bytes (the rest is dropped and the connection
+/// closed). Returns the response and whether it was truncated. Used where the peer controls the
+/// size (container logs).
+pub async fn send_capped(
+    target: &Target,
+    r: &Req,
+    timeout: Duration,
+    cap: usize,
+) -> Result<(Resp, bool), HttpError> {
+    use http_body_util::BodyExt;
+    let fut = async {
+        let resp = send_stream(target, r).await?;
+        let status = resp.status().as_u16();
+        let headers = resp
+            .headers()
+            .iter()
+            .map(|(k, v)| (k.as_str().to_string(), v.to_str().unwrap_or("").to_string()))
+            .collect();
+        let mut body = resp.into_body();
+        let mut buf: Vec<u8> = Vec::new();
+        let mut truncated = false;
+        while let Some(frame) = body.frame().await {
+            let frame = frame.map_err(|e| HttpError::Http(e.to_string()))?;
+            if let Some(data) = frame.data_ref() {
+                let room = cap.saturating_sub(buf.len());
+                if data.len() > room {
+                    buf.extend_from_slice(&data[..room]);
+                    truncated = true;
+                    break;
+                }
+                buf.extend_from_slice(data);
+            }
+        }
+        Ok((
+            Resp {
+                status,
+                headers,
+                body: Bytes::from(buf),
+            },
+            truncated,
+        ))
+    };
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| HttpError::Timeout)?
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -295,6 +343,31 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(resp.text(), "unix-ok");
+    }
+
+    #[tokio::test]
+    async fn unix_requests_carry_a_loopback_host_header() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("s.sock");
+        let m = MockHttp::start_unix(&p, |_| (200, vec![], String::new())).await;
+        send(&Target::Unix(p), &Req::get("/"), Duration::from_secs(5))
+            .await
+            .unwrap();
+        assert_eq!(m.requests()[0].header("host").as_deref(), Some("127.0.0.1"));
+    }
+
+    #[tokio::test]
+    async fn capped_reads_stop_early() {
+        let m = MockHttp::start(|_| (200, vec![], "x".repeat(10_000))).await;
+        let t = Target::Tcp(m.addr.clone());
+        let (r, truncated) = send_capped(&t, &Req::get("/"), Duration::from_secs(5), 100)
+            .await
+            .unwrap();
+        assert!(truncated && r.body.len() == 100);
+        let (r, truncated) = send_capped(&t, &Req::get("/"), Duration::from_secs(5), 1_000_000)
+            .await
+            .unwrap();
+        assert!(!truncated && r.body.len() == 10_000);
     }
 
     #[tokio::test]

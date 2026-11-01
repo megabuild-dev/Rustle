@@ -87,7 +87,8 @@ pub fn create_body(spec: &ContainerSpec) -> Value {
     });
     if let Some(cmd) = &spec.cmd {
         body["Cmd"] = json!(cmd);
-        body["Entrypoint"] = Value::Null;
+        // `[""]` clears the image ENTRYPOINT; `null` would keep it and turn the argv into its arguments.
+        body["Entrypoint"] = json!([""]);
     }
     body
 }
@@ -191,6 +192,19 @@ fn q(s: &str) -> String {
     urlencoding::encode(s).into_owned()
 }
 
+fn check_pull_line(line: &[u8]) -> RtResult<()> {
+    if let Ok(v) = serde_json::from_slice::<Value>(line) {
+        if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
+            // Credentials are never echoed by Docker, but cap the length anyway.
+            return Err(RtError::Other(format!(
+                "pull failed: {}",
+                e.chars().take(300).collect::<String>()
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Split Docker's multiplexed log stream (8-byte frame headers) into text.
 pub fn demux_logs(data: &[u8]) -> String {
     let mut out = String::new();
@@ -235,22 +249,48 @@ impl Runtime for HttpRuntime {
             let enc = base64::engine::general_purpose::URL_SAFE.encode(j.to_string());
             req = req.header("x-registry-auth", enc);
         }
-        let resp = self.call(req, Duration::from_secs(900)).await?;
-        if !resp.ok() {
-            return Err(Self::map_err(&resp));
-        }
-        // The body is a stream of JSON objects; failures are reported in-band with HTTP 200.
-        for line in resp.text().lines() {
-            if let Ok(v) = serde_json::from_str::<Value>(line) {
-                if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
-                    // Never echo credentials back; docker does not include them, but cap the length.
-                    return Err(RtError::Other(format!(
-                        "pull failed: {}",
-                        e.chars().take(300).collect::<String>()
-                    )));
+        // The body is a long stream of JSON progress lines; failures are reported in-band with
+        // HTTP 200. Parse it incrementally and keep only the current partial line in memory.
+        use http_body_util::BodyExt;
+        let pull = async {
+            let resp = httpc::send_stream(&self.target, &req)
+                .await
+                .map_err(|e| RtError::Unavailable(e.to_string()))?;
+            if !resp.status().is_success() {
+                let status = resp.status().as_u16();
+                let body = resp
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|b| b.to_bytes())
+                    .unwrap_or_default();
+                return Err(Self::map_err(&httpc::Resp {
+                    status,
+                    headers: vec![],
+                    body,
+                }));
+            }
+            let mut body = resp.into_body();
+            let mut line: Vec<u8> = Vec::new();
+            while let Some(frame) = body.frame().await {
+                let frame = frame.map_err(|e| RtError::Unavailable(e.to_string()))?;
+                let Some(data) = frame.data_ref() else {
+                    continue;
+                };
+                for &b in data.iter() {
+                    if b == b'\n' {
+                        check_pull_line(&line)?;
+                        line.clear();
+                    } else if line.len() < 64 * 1024 {
+                        line.push(b);
+                    }
                 }
             }
-        }
+            check_pull_line(&line)
+        };
+        tokio::time::timeout(Duration::from_secs(900), pull)
+            .await
+            .map_err(|_| RtError::Unavailable("image pull timed out".into()))??;
         Ok(())
     }
 
@@ -414,19 +454,24 @@ impl Runtime for HttpRuntime {
     }
 
     async fn logs(&self, id: &str, tail: u32) -> RtResult<String> {
-        let r = self
-            .call(
-                Req::get(format!(
-                    "/containers/{}/logs?stdout=1&stderr=1&timestamps=1&tail={tail}",
-                    q(id)
-                )),
-                Duration::from_secs(20),
-            )
-            .await?;
+        // Log lines are tenant-controlled: read at most 256 KiB, whatever `tail` says.
+        let req = Req::get(format!(
+            "/containers/{}/logs?stdout=1&stderr=1&timestamps=1&tail={}",
+            q(id),
+            tail.min(500)
+        ));
+        let (r, truncated) =
+            httpc::send_capped(&self.target, &req, Duration::from_secs(20), 256 * 1024)
+                .await
+                .map_err(|e| RtError::Unavailable(e.to_string()))?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
-        Ok(demux_logs(&r.body))
+        let mut text = demux_logs(&r.body);
+        if truncated {
+            text.push_str("\n[rustle] output truncated\n");
+        }
+        Ok(text)
     }
 
     async fn logs_follow(&self, id: &str, tail: u32) -> RtResult<mpsc::Receiver<String>> {
@@ -445,15 +490,25 @@ impl Runtime for HttpRuntime {
                 RtError::Other("logs failed".into())
             });
         }
-        let (tx, rx) = mpsc::channel::<String>(64);
+        let (tx, rx) = mpsc::channel::<String>(16);
         tokio::spawn(async move {
             let mut body = resp.into_body();
             let mut buf: Vec<u8> = Vec::new();
-            while let Some(Ok(frame)) = body.frame().await {
+            loop {
+                // Wake up when the subscriber leaves even if the container is silent, so the
+                // connection to the proxy is released immediately.
+                let frame = tokio::select! {
+                    _ = tx.closed() => return,
+                    f = body.frame() => f,
+                };
+                let Some(Ok(frame)) = frame else { return };
                 let Some(data) = frame.data_ref() else {
                     continue;
                 };
                 buf.extend_from_slice(data);
+                if buf.len() > 1024 * 1024 {
+                    return; // a runaway producer: stop rather than grow
+                }
                 // Emit only complete frames.
                 let mut i = 0;
                 let mut text = String::new();
@@ -468,7 +523,7 @@ impl Runtime for HttpRuntime {
                 }
                 buf.drain(..i);
                 if !text.is_empty() && tx.send(text).await.is_err() {
-                    return; // subscriber gone: dropping the body closes the connection
+                    return;
                 }
             }
         });
@@ -949,7 +1004,7 @@ mod tests {
         }
         let b = create_body(&spec(false, false));
         assert_eq!(b["Cmd"], json!(["node", "job.js"]));
-        assert!(b["Entrypoint"].is_null());
+        assert_eq!(b["Entrypoint"], json!([""]));
     }
 
     #[test]

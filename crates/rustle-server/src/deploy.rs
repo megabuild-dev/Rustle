@@ -206,6 +206,8 @@ pub async fn execute(state: &AppState, site_id: &str, job: &Job) {
             let _ = state.store.update_deployment(&dep);
             let status = if f.previous_ok { "running" } else { "failed" };
             let _ = state.store.set_site_status(&site.id, status);
+            // A token holder must not be able to grow the table with failing deploys.
+            let _ = state.store.trim_deployments(&site.id, 50);
         }
     }
 }
@@ -309,6 +311,7 @@ async fn run_deploy(
     // Stop-first: the old container is stopped but NOT removed, so it can be restarted if the
     // new one fails. Start-first leaves it running until the new one is healthy.
     let mut stopped_old = false;
+    let mut old_gone = false;
     if !start_first {
         if let Some(o) = &old {
             match rt
@@ -319,7 +322,7 @@ async fn run_deploy(
                 .await
             {
                 Ok(()) => stopped_old = true,
-                Err(RtError::NotFound) => {}
+                Err(RtError::NotFound) => old_gone = true, // the container vanished: nothing to restore later
                 Err(e) => {
                     return Err(fail(
                         format!("could not stop the running version: {e}"),
@@ -329,6 +332,8 @@ async fn run_deploy(
             }
         }
     }
+
+    let prev_ok = prev_ok && !old_gone;
 
     let id = match rt.create(&spec).await {
         Ok(id) => id,
@@ -417,6 +422,13 @@ async fn run_deploy(
         )
         .await);
     }
+
+    // Record the new deployment as current BEFORE the old container disappears: a crash between
+    // the two must never leave the database pointing at a container that no longer exists.
+    dep.status = "running".into();
+    dep.finished_at = Some(now());
+    let _ = state.store.update_deployment(dep);
+    let _ = state.store.set_current_deployment(&site.id, Some(&dep.id));
 
     // Success: retire the previous version.
     if let Some(o) = &old {

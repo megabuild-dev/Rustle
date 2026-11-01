@@ -20,7 +20,8 @@ pub const SYSTEM_JOBS: [(&str, &str, &str); 4] = [
     ("update_check", "Daily update check", "0 5 * * *"),
 ];
 
-pub const MAX_LOG: usize = 64 * 1024;
+/// Kept per run in SQLite (and therefore in every backup); 50 runs per job are retained.
+pub const MAX_LOG: usize = 16 * 1024;
 
 pub fn seed_system_jobs(store: &Store) -> AppResult<()> {
     for (key, name, schedule) in SYSTEM_JOBS {

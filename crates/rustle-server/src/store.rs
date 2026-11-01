@@ -204,8 +204,19 @@ fn apply_pragmas(c: &Connection) -> rusqlite::Result<()> {
     Ok(())
 }
 
+const SCHEMA_VERSION: i64 = 1;
+
 fn migrate(c: &Connection) -> rusqlite::Result<()> {
     let v: i64 = c.query_row("PRAGMA user_version", [], |r| r.get(0))?;
+    if v > SCHEMA_VERSION {
+        // Written by a newer Rustle (e.g. after an automatic revert): running on it could corrupt data.
+        return Err(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_MISMATCH),
+            Some(format!(
+                "database schema v{v} is newer than this binary (v{SCHEMA_VERSION})"
+            )),
+        ));
+    }
     if v < 1 {
         c.execute_batch("BEGIN;")?;
         let r = c
@@ -295,7 +306,13 @@ impl Store {
         }
         let c = Connection::open(path)?;
         apply_pragmas(&c)?;
-        migrate(&c)?;
+        migrate(&c).map_err(|e| {
+            crate::error::AppError::new(
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "db_schema",
+                e.to_string(),
+            )
+        })?;
         Ok(Store {
             conn: Mutex::new(c),
             path: Some(path.to_path_buf()),
@@ -1075,6 +1092,19 @@ mod tests {
         }
         s.trim_backup_runs(3).unwrap();
         assert_eq!(s.list_backup_runs(10).unwrap().len(), 3);
+    }
+
+    #[test]
+    fn refuses_a_database_from_a_newer_version() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("a.db");
+        drop(Store::open(&p).unwrap());
+        Connection::open(&p)
+            .unwrap()
+            .pragma_update(None, "user_version", 99)
+            .unwrap();
+        let err = Store::open(&p).err().expect("must refuse");
+        assert!(err.message.contains("newer"), "{}", err.message);
     }
 
     #[test]

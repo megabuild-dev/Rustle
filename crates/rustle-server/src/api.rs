@@ -72,10 +72,16 @@ async fn security_headers(mut res: Response) -> Response {
 
 pub fn router(state: S) -> Router {
     let api = Router::new()
-        .route("/auth/login", post(login))
+        .route(
+            "/auth/login",
+            post(login).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/auth/logout", post(logout))
         .route("/auth/me", get(me))
-        .route("/auth/password", post(change_password))
+        .route(
+            "/auth/password",
+            post(change_password).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/system/stats", get(stats))
         .route("/system/stream", get(stats_stream))
         .route("/system/prune", post(prune))
@@ -110,7 +116,10 @@ pub fn router(state: S) -> Router {
         .route("/sites/{id}/workflow", get(workflow))
         .route("/sites/{id}/deployments", get(list_deployments))
         .route("/sites/{id}/rollback", post(rollback))
-        .route("/webhooks/deploy", post(webhook))
+        .route(
+            "/webhooks/deploy",
+            post(webhook).layer(DefaultBodyLimit::max(4 * 1024)),
+        )
         .route("/cron", get(list_cron).post(create_cron))
         .route("/cron/{id}", patch(patch_cron).delete(delete_cron))
         .route("/cron/{id}/runs", get(cron_runs))
@@ -122,6 +131,8 @@ pub fn router(state: S) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .fallback(assets::serve)
         .layer(DefaultBodyLimit::max(64 * 1024))
+        // Cap in-flight requests: the 48 MB ceiling is a hard limit, a flood must queue, not allocate.
+        .layer(tower::limit::ConcurrencyLimitLayer::new(64))
         .layer(map_response(security_headers))
         .with_state(state)
 }
@@ -154,6 +165,13 @@ async fn login(
     if req.password.len() > 512 || req.username.len() > 128 {
         return Err(AppError::bad_request("credentials too long"));
     }
+    // Hashing is serialized (8 MiB each); at most a few requests may wait for the turn, the rest are
+    // refused so an unauthenticated flood cannot pile up memory.
+    let _queued = s
+        .auth
+        .hash_queue
+        .try_acquire()
+        .map_err(|_| AppError::too_many("server busy; try again in a moment"))?;
     // Always run the hash (even for a wrong username) so timing does not reveal the username.
     let _permit = s
         .auth
@@ -172,8 +190,11 @@ async fn login(
     let ok_user = crypto::ct_eq(req.username.as_bytes(), user.as_bytes());
     drop(_permit);
     if !(ok_pw && ok_user) {
-        s.auth.login_failed(&ip, at);
-        s.store.audit(at, &ip, "login.failed", "-");
+        let fails = s.auth.login_failed(&ip, at);
+        // Audit the first failures and then every tenth: a guessing run must not grow the database.
+        if fails <= 3 || fails.is_multiple_of(10) {
+            s.store.audit(at, &ip, "login.failed", &format!("x{fails}"));
+        }
         return Err(AppError::unauthorized("invalid username or password"));
     }
     s.auth.login_ok(&ip);
@@ -512,7 +533,7 @@ async fn site_logs(
     let cid = current_container(&s, &id)?;
     let logs = s
         .runtime
-        .logs(&cid, q.tail.unwrap_or(200).min(2000))
+        .logs(&cid, q.tail.unwrap_or(200).min(500))
         .await
         .map_err(|e| AppError::unavailable(e.to_string()))?;
     Ok(Json(serde_json::json!({ "logs": logs })))
@@ -527,7 +548,7 @@ async fn site_logs_stream(
     let cid = current_container(&s, &id)?;
     let mut rx = s
         .runtime
-        .logs_follow(&cid, q.tail.unwrap_or(100).min(1000))
+        .logs_follow(&cid, q.tail.unwrap_or(100).min(500))
         .await
         .map_err(|e| AppError::unavailable(e.to_string()))?;
     let (tx, out) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);

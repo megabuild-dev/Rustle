@@ -27,9 +27,33 @@ pub fn random_password(len: usize) -> String {
 /// Idempotent first-run setup: master key, admin account, baseline RAM measurement, system jobs.
 pub fn init(cfg: &Config, reset_password: bool) -> Result<InitResult, String> {
     let existed = cfg.master_key_file.exists();
+    if !existed && cfg.db_path.exists() {
+        let has_data = Store::open(&cfg.db_path)
+            .map_err(|e| e.message)?
+            .admin()
+            .map_err(|e| e.message)?
+            .is_some();
+        if has_data {
+            return Err(format!(
+                "{} exists but the master key {} does not. A new key would make every stored secret unreadable. \
+                 Restore the original key file (hex, mode 0600) and run again.",
+                cfg.db_path.display(),
+                cfg.master_key_file.display()
+            ));
+        }
+    }
     let key =
         MasterKey::load(&cfg.master_key_file, true).map_err(|e| format!("master key: {e}"))?;
     let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
+    match store.setting("key_check").map_err(|e| e.message)? {
+        Some(c) if c != key.check_value() => {
+            return Err("the master key does not match this database".into())
+        }
+        Some(_) => {}
+        None => store
+            .set_setting("key_check", &key.check_value())
+            .map_err(|e| e.message)?,
+    }
     let mut password = None;
     if store.admin().map_err(|e| e.message)?.is_none() || reset_password {
         let pw = random_password(24);
@@ -161,6 +185,23 @@ mod tests {
             1,
             "reset revokes existing sessions"
         );
+    }
+
+    #[test]
+    fn init_refuses_to_replace_a_lost_master_key() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cfg(d.path());
+        init(&c, false).unwrap();
+        std::fs::remove_file(&c.master_key_file).unwrap();
+        let err = init(&c, false).err().expect("must refuse");
+        assert!(err.contains("master key"), "{err}");
+        assert!(
+            !c.master_key_file.exists(),
+            "no replacement key was created"
+        );
+        // a different key restored by hand is also detected
+        std::fs::write(&c.master_key_file, MasterKey::generate().to_hex()).unwrap();
+        assert!(init(&c, false).err().unwrap().contains("does not match"));
     }
 
     #[test]

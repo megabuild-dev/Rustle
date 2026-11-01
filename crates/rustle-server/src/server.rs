@@ -52,6 +52,17 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     if store.admin().map_err(|e| e.message)?.is_none() {
         return Err("not initialized: run `rustle init` first".into());
     }
+    match store.setting("key_check").map_err(|e| e.message)? {
+        Some(c) if c != key.check_value() => {
+            return Err(format!(
+                "the master key in {} does not match this database; refusing to start (restore the original key)",
+                cfg.master_key_file.display()
+            ))
+        }
+        Some(_) => {}
+        // Databases created before the check existed: record it now.
+        None => store.set_setting("key_check", &key.check_value()).map_err(|e| e.message)?,
+    }
     let state = build_state(cfg.clone(), key, store);
     let app = api::router(state.clone());
 

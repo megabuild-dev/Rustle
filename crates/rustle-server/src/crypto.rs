@@ -116,6 +116,12 @@ impl MasterKey {
         String::from_utf8(self.open(blob, aad.as_bytes())?).map_err(|_| CryptoError::Malformed)
     }
 
+    /// Fingerprint stored next to the data so a wrong or regenerated key is detected instead of
+    /// silently orphaning every encrypted value.
+    pub fn check_value(&self) -> String {
+        hex::encode(self.hmac("key-check", b"rustle"))
+    }
+
     pub fn hmac(&self, label: &str, data: &[u8]) -> Vec<u8> {
         let key = self.derive(label);
         let mut m = <HmacSha256 as Mac>::new_from_slice(&key).expect("hmac accepts any key length");

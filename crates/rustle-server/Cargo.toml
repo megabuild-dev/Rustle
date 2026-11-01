@@ -18,7 +18,7 @@ dev-fakes = []
 rustle-types = { path = "../rustle-types" }
 tokio = { version = "1", default-features = false, features = ["rt", "net", "time", "macros", "sync", "signal", "fs", "io-util"] }
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio", "query", "matched-path"] }
-tower = { version = "0.5", default-features = false, features = ["util"] }
+tower = { version = "0.5", default-features = false, features = ["util", "limit"] }
 hyper = { version = "1", default-features = false, features = ["http1", "client", "server"] }
 hyper-util = { version = "0.1", default-features = false, features = ["tokio", "http1"] }
 http-body-util = "0.1"
