@@ -142,8 +142,16 @@ pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
 
+/// Constant-time (for equal lengths) comparison; length differences are not secret here.
 pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
-    ring::constant_time::verify_slices_are_equal(a, b).is_ok()
+    if a.len() != b.len() {
+        return false;
+    }
+    let mut diff = 0u8;
+    for (x, y) in a.iter().zip(b) {
+        diff |= x ^ y;
+    }
+    std::hint::black_box(diff) == 0
 }
 
 /// URL-safe random token with `bytes` bytes of entropy.

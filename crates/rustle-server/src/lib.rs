@@ -4,6 +4,7 @@ pub mod assets;
 pub mod auth;
 pub mod backup;
 pub mod caddy;
+pub mod cli;
 pub mod config;
 pub mod cron;
 pub mod crypto;
@@ -19,6 +20,7 @@ pub mod reconcile;
 #[doc(hidden)]
 pub mod testutil;
 pub mod sites;
+pub mod server;
 pub mod store;
 pub mod update;
 pub mod util;

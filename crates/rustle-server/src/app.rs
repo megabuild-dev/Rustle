@@ -146,6 +146,20 @@ impl AppState {
         gateway: Arc<dyn Gateway>,
         github: Arc<dyn Github>,
     ) -> Arc<AppState> {
+        Self::with_backends(cfg, store, key, runtime, gateway, Arc::new(HttpHealth), Arc::new(SystemResolver), github)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_backends(
+        cfg: Config,
+        store: Store,
+        key: MasterKey,
+        runtime: Arc<dyn Runtime>,
+        gateway: Arc<dyn Gateway>,
+        health: Arc<dyn Health>,
+        resolver: Arc<dyn Resolver>,
+        github: Arc<dyn Github>,
+    ) -> Arc<AppState> {
         let auth = AuthState::new(&key);
         Arc::new(AppState {
             cfg,
@@ -153,8 +167,8 @@ impl AppState {
             key,
             runtime,
             gateway,
-            health: Arc::new(HttpHealth),
-            resolver: Arc::new(SystemResolver),
+            health,
+            resolver,
             github,
             auth,
             deployer: Deployer::default(),
