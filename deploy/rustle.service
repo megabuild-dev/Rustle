@@ -1,0 +1,57 @@
+[Unit]
+Description=Rustle admin (ultra-light PaaS)
+Documentation=https://github.com/megalabs-dev/rustle
+After=docker.service network-online.target
+Wants=docker.service network-online.target
+
+[Service]
+Type=simple
+User=rustle
+Group=rustle
+EnvironmentFile=-/etc/rustle/rustle.env
+Environment=MALLOC_ARENA_MAX=1
+# The binary lives in the writable state dir so it can update itself under ProtectSystem=strict.
+ExecStartPre=/usr/lib/rustle/prestart.sh
+ExecStart=/var/lib/rustle/bin/rustle serve
+Restart=always
+RestartSec=2
+TimeoutStopSec=15
+StateDirectory=rustle
+RuntimeDirectory=rustle
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+
+# Hard resource ceiling: even a bug or leak cannot take the 1 GB host down.
+MemoryHigh=32M
+MemoryMax=48M
+CPUQuota=30%
+TasksMax=64
+
+# Sandbox. The admin needs no privileges at all: it talks to a local socket proxy and to Caddy's socket.
+NoNewPrivileges=true
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
+ProtectProc=invisible
+LockPersonality=true
+MemoryDenyWriteExecute=true
+RestrictRealtime=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

@@ -43,7 +43,7 @@ PY
 }
 for f in ui-dist/*.js ui-dist/*.wasm ui-dist/*.css ui-dist/index.html; do compress "$f"; done
 
-echo "ui-dist:"; ls -l ui-dist | awk '{print $5, $9}'
+echo "ui-dist:"; find ui-dist -maxdepth 1 -type f -printf '%s %f\n' 
 total=$(cat ui-dist/*.br | wc -c)
 echo "compressed total: $total bytes"
 [ "$total" -lt 1048576 ] || { echo "ERROR: compressed UI exceeds the 1 MiB budget" >&2; exit 1; }

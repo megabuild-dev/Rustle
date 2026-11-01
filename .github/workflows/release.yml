@@ -1,0 +1,80 @@
+name: Release
+
+# Tag a version (v0.1.0) whose number matches crates/rustle-server/Cargo.toml.
+# Needs: repository secret RUSTLE_SIGNING_KEY (PEM, see docs/RELEASING.md) and
+#        repository variable RUSTLE_UPDATE_PUBKEY_HEX (64 hex chars, the matching public key).
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: x86_64 }
+          - { os: ubuntu-24.04-arm, arch: aarch64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the crate version
+        run: |
+          V="$(grep -m1 '^version' Cargo.toml | sed 's/.*"\(.*\)".*/\1/')"
+          [ "v$V" = "${GITHUB_REF_NAME}" ] || { echo "tag ${GITHUB_REF_NAME} != workspace version v$V"; exit 1; }
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: Swatinem/rust-cache@v2
+      - name: Install trunk and the matching wasm-bindgen
+        run: |
+          cargo install trunk --locked
+          WB="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[^0-9.]/,"",$3); print $3; exit}' Cargo.lock)"
+          cargo install wasm-bindgen-cli --version "$WB" --locked
+      - run: pip install brotli
+      - run: ./scripts/build-ui.sh
+      - name: Build the server
+        env:
+          RUSTLE_UPDATE_PUBKEY_HEX: ${{ vars.RUSTLE_UPDATE_PUBKEY_HEX }}
+        run: |
+          [ -n "$RUSTLE_UPDATE_PUBKEY_HEX" ] || { echo "RUSTLE_UPDATE_PUBKEY_HEX variable is not set"; exit 1; }
+          cargo build --release -p rustle-server
+          cp target/release/rustle "rustle-${{ matrix.arch }}-linux"
+      - name: Sign (ed25519, raw 64-byte signature)
+        env:
+          KEY: ${{ secrets.RUSTLE_SIGNING_KEY }}
+        run: |
+          umask 077
+          printf '%s\n' "$KEY" > key.pem
+          openssl pkeyutl -sign -rawin -inkey key.pem -in "rustle-${{ matrix.arch }}-linux" -out "rustle-${{ matrix.arch }}-linux.sig"
+          openssl pkey -in key.pem -pubout -out pub.pem
+          openssl pkeyutl -verify -rawin -pubin -inkey pub.pem -in "rustle-${{ matrix.arch }}-linux" -sigfile "rustle-${{ matrix.arch }}-linux.sig"
+          rm -f key.pem
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rustle-${{ matrix.arch }}
+          path: |
+            rustle-${{ matrix.arch }}-linux
+            rustle-${{ matrix.arch }}-linux.sig
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - name: Checksums and installer bundle
+        run: |
+          cd dist
+          sha256sum rustle-*-linux > SHA256SUMS
+          cd ..
+          tar czf dist/rustle-installer.tar.gz install deploy
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "${GITHUB_REF_NAME}" dist/* --title "${GITHUB_REF_NAME}" --generate-notes

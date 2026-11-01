@@ -1,0 +1,105 @@
+name: CI
+
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  server:
+    name: Server (fmt, clippy, tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy -p rustle-types -p rustle-server --all-targets -- -D warnings
+      - run: cargo test -p rustle-types -p rustle-server
+
+  ui:
+    name: Dashboard (WebAssembly)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Cache installed tools
+        uses: actions/cache@v4
+        with:
+          path: ~/.cargo/bin
+          key: tools-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+      - name: Install trunk and the matching wasm-bindgen
+        run: |
+          command -v trunk >/dev/null || cargo install trunk --locked
+          WB="$(awk '/^name = "wasm-bindgen"$/{getline; gsub(/[^0-9.]/,"",$3); print $3; exit}' Cargo.lock)"
+          if ! wasm-bindgen --version 2>/dev/null | grep -q "$WB"; then cargo install wasm-bindgen-cli --version "$WB" --locked --force; fi
+      - run: cargo clippy -p rustle-ui --target wasm32-unknown-unknown -- -D warnings
+      - run: pip install brotli
+      - run: ./scripts/build-ui.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ui-dist
+          path: ui-dist
+          include-hidden-files: true
+
+  smoke:
+    name: RSS gate and browser test (fake backends)
+    needs: ui
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui-dist
+      - run: cargo build --release -p rustle-server --features dev-fakes
+      - name: RSS gate (steady < 8 MB, peak < 24 MB)
+        run: python3 scripts/rss_smoke.py
+      - name: Browser end-to-end
+        run: |
+          npm install --no-save playwright
+          npx playwright install --with-deps chromium
+          node scripts/ui_e2e.js /tmp/shots
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ui-screenshots
+          path: /tmp/shots
+
+  shell:
+    name: Installer scripts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck install/*.sh deploy/prestart.sh scripts/*.sh
+      - run: RUSTLE_INSTALL_DRY_RUN=1 ./install/install.sh --domain admin.example.com --email ops@example.com
+      - run: sudo apt-get install -y -qq systemd >/dev/null && systemd-analyze verify --man=no deploy/rustle.service || true
+
+  real-docker:
+    name: End-to-end with real Docker, socket proxy and Caddy
+    needs: [server, smoke]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui-dist
+      - run: cargo build --release -p rustle-server
+      - name: Run the real-stack scenario
+        run: RUSTLE_BIN="$PWD/target/release/rustle" ./scripts/e2e-real.sh

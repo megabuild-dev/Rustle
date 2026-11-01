@@ -1,0 +1,50 @@
+# Local development stack: the same topology as production, minus systemd.
+# Rustle itself runs on your host:   see docs/DEV.md
+#
+#   docker compose -f deploy/docker-compose.dev.yml up -d
+#   export RUSTLE_STATE_DIR=$PWD/.dev RUSTLE_MASTER_KEY_FILE=$PWD/.dev/master.key RUSTLE_SOCKET=/tmp/rustle/rustle.sock
+#   cargo run -p rustle-server -- init && cargo run -p rustle-server
+#
+# NEVER mount /var/run/docker.sock into the Rustle container or process directly: only the proxy sees it.
+name: rustle-dev
+services:
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:0.3.0
+    environment:
+      CONTAINERS: 1
+      IMAGES: 1
+      NETWORKS: 0
+      VOLUMES: 0
+      EXEC: 0
+      SYSTEM: 0
+      EVENTS: 0
+      POST: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "127.0.0.1:2375:2375"
+    mem_limit: 32m
+    restart: unless-stopped
+  caddy:
+    image: caddy:2-alpine
+    command: caddy run --config /etc/caddy/caddy.json --resume
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - /tmp/rustle:/run/rustle
+      - ./.dev/caddy.json:/etc/caddy/caddy.json:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    networks: [rustle-net]
+    mem_limit: 96m
+    restart: unless-stopped
+networks:
+  rustle-net:
+    name: rustle-net
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+volumes:
+  caddy_data:
+  caddy_config:
