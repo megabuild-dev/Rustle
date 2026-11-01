@@ -231,6 +231,9 @@ impl FakeGateway {
     pub fn calls(&self) -> Vec<String> {
         self.st.lock().unwrap().calls.clone()
     }
+    pub fn clear_calls(&self) {
+        self.st.lock().unwrap().calls.clear();
+    }
     pub fn sites(&self) -> BTreeMap<String, (String, String)> {
         self.st.lock().unwrap().sites.clone()
     }

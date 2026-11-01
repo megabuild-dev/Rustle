@@ -1,5 +1,6 @@
 pub mod app;
 pub mod auth;
+pub mod backup;
 pub mod caddy;
 pub mod config;
 pub mod cron;
@@ -10,9 +11,12 @@ pub mod error;
 pub mod github;
 pub mod httpc;
 pub mod imageref;
+pub mod jobs;
 pub mod metrics;
+pub mod reconcile;
 #[doc(hidden)]
 pub mod testutil;
 pub mod sites;
 pub mod store;
+pub mod update;
 pub mod util;

@@ -191,9 +191,14 @@ pub struct TestEnv {
 #[cfg(test)]
 impl TestEnv {
     pub fn new() -> TestEnv {
+        Self::build(false)
+    }
+
+    pub fn build(file_db: bool) -> TestEnv {
         use crate::docker::FakeRuntime;
         let dir = tempfile::tempdir().unwrap();
         let cfg = Config::for_tests(dir.path());
+        let cfg_db = cfg.db_path.clone();
         let runtime = Arc::new(FakeRuntime::new());
         let gateway = Arc::new(crate::caddy::FakeGateway::new());
         let health = Arc::new(FakeHealth::new(true));
@@ -203,7 +208,7 @@ impl TestEnv {
         let auth = AuthState::new(&key);
         let state = Arc::new(AppState {
             cfg,
-            store: Store::open_memory().unwrap(),
+            store: if file_db { Store::open(&cfg_db).unwrap() } else { Store::open_memory().unwrap() },
             key,
             runtime: runtime.clone(),
             gateway: gateway.clone(),
