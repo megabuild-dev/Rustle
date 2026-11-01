@@ -1,0 +1,20 @@
+[workspace]
+resolver = "2"
+members = ["crates/rustle-types", "crates/rustle-server", "crates/rustle-ui"]
+default-members = ["crates/rustle-types", "crates/rustle-server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+rust-version = "1.80"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+
+[profile.dev]
+debug = 1
