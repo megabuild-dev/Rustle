@@ -109,6 +109,14 @@ else
 fi
 run systemctl enable --now docker
 
+# Keep the journal small: logs are a RAM/disk cost on a 1 GB box.
+write_file /etc/systemd/journald.conf.d/rustle.conf 0644 <<'CONF'
+[Journal]
+SystemMaxUse=100M
+RuntimeMaxUse=32M
+CONF
+run systemctl restart systemd-journald
+
 # ---- 3. user, directories ---------------------------------------------------------------------
 log "Service user and directories"
 id rustle >/dev/null 2>&1 || run useradd --system --home-dir /var/lib/rustle --shell /usr/sbin/nologin rustle
