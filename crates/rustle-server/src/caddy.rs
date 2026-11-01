@@ -85,6 +85,12 @@ pub fn base_config(p: &BaseParams) -> Value {
     if !policies.is_empty() {
         apps["tls"] = json!({ "automation": { "policies": policies } });
     }
+    if p.admin_domain.is_none() {
+        if let Some(ip) = &p.public_ip {
+            // No route names the IP as a host, so automatic HTTPS would never issue for it: say so.
+            apps["tls"]["certificates"] = json!({ "automate": [ip] });
+        }
+    }
     apps["http"] = json!({ "servers": { "main": server } });
     json!({ "admin": { "listen": listen }, "apps": apps })
 }
