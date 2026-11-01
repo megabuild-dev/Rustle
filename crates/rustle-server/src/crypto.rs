@@ -175,6 +175,16 @@ fn argon() -> Argon2<'static> {
     Argon2::new(Algorithm::Argon2id, Version::V0x13, params)
 }
 
+/// Give freed heap pages back to the OS (glibc keeps them otherwise). Called after password
+/// hashing, whose 8 MiB working set is by far the biggest allocation spike in the process.
+pub fn release_memory() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: malloc_trim has no preconditions; it only returns unused heap memory to the kernel.
+    unsafe {
+        libc::malloc_trim(0);
+    }
+}
+
 pub fn hash_password(pw: &str) -> String {
     let mut salt_bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut salt_bytes);

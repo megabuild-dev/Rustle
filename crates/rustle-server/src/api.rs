@@ -128,7 +128,13 @@ async fn login(State(s): State<S>, headers: HeaderMap, ApiJson(req): ApiJson<Log
     // Always run the hash (even for a wrong username) so timing does not reveal the username.
     let _permit = s.auth.hash_gate.acquire().await.map_err(AppError::internal)?;
     let pw = req.password.clone();
-    let ok_pw = tokio::task::spawn_blocking(move || crypto::verify_password(&pw, &hash)).await.map_err(AppError::internal)?;
+    let ok_pw = tokio::task::spawn_blocking(move || {
+        let ok = crypto::verify_password(&pw, &hash);
+        crypto::release_memory();
+        ok
+    })
+    .await
+    .map_err(AppError::internal)?;
     let ok_user = crypto::ct_eq(req.username.as_bytes(), user.as_bytes());
     drop(_permit);
     if !(ok_pw && ok_user) {
@@ -162,11 +168,24 @@ async fn change_password(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<Ch
     let (_, hash, _) = s.store.admin()?.ok_or_else(|| AppError::unauthorized("not initialized"))?;
     let _permit = s.auth.hash_gate.acquire().await.map_err(AppError::internal)?;
     let cur = req.current.clone();
-    if !tokio::task::spawn_blocking(move || crypto::verify_password(&cur, &hash)).await.map_err(AppError::internal)? {
+    let cur_ok = tokio::task::spawn_blocking(move || {
+        let ok = crypto::verify_password(&cur, &hash);
+        crypto::release_memory();
+        ok
+    })
+    .await
+    .map_err(AppError::internal)?;
+    if !cur_ok {
         return Err(AppError::forbidden("current password is incorrect"));
     }
     let new = req.new.clone();
-    let new_hash = tokio::task::spawn_blocking(move || crypto::hash_password(&new)).await.map_err(AppError::internal)?;
+    let new_hash = tokio::task::spawn_blocking(move || {
+        let h = crypto::hash_password(&new);
+        crypto::release_memory();
+        h
+    })
+    .await
+    .map_err(AppError::internal)?;
     drop(_permit);
     s.store.set_admin_password(&new_hash)?; // bumps token_version: every session, including this one, is revoked
     audit(&s, "password.change", "admin");
