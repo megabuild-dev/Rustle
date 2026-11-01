@@ -19,3 +19,12 @@ Made during implementation after review by an independent senior reviewer; each 
 | Backup/update TLS | "no TLS client in admin" | rustls (ring) used only for GitHub | Needed for FR-22/FR-23; the cost is code size, not RSS |
 | Dashboard distribution | React SPA | Leptos WebAssembly | Decided with the product owner |
 | Update trust | checksum | mandatory Ed25519 signature, automatic revert after 3 failed boots | A checksum from the same origin proves nothing |
+| Docker proxy exposure | published on `127.0.0.1:2375` | own bridge `rustle-docker`, fixed `172.31.0.2`, nothing published; `DOCKER_HOST` default changed | Review: with `userland-proxy=false` loopback-published ports can be reachable from the local network on older Docker, and any local process could reach a root-equivalent API |
+| Auto-revert | revert after 3 failed boots | revert only while `bin/update-pending` exists (created by an update, removed after 30 healthy seconds); the database refuses to open under a binary older than its schema | Crashes, OOM kills or manual restarts must never silently downgrade the binary |
+| Release signing | signature over the binary | signature over `rustle-release-v1 / tag / arch / sha256`, produced in a separate job bound to a protected environment | Replay of an older signed binary; keep the key away from build tooling |
+| Master key safety | key created on `init` if missing | `init` and `serve` refuse when the key is missing or does not match the database (`key_check`); the installer's acknowledgement is recorded in a marker | A regenerated key would silently orphan every secret |
+| Port 80 | Caddy server listens on `:443` and `:80` | `:443` only; Caddy's automatic HTTPS owns `:80` | Listening on `:80` in the same server would serve routes over plain HTTP |
+| Logout | clears the cookie | also revokes the token (token version bump) | A stolen token must die with the session |
+| Cookie | `rustle_session` | `__Host-rustle_session` | A sibling subdomain (a tenant) must not be able to plant the cookie |
+| Job and log sizes | 64 KB per run | 16 KB per run; container logs read at most 256 KiB, `tail` at most 500 lines; image pull progress is streamed, never buffered | RAM and database growth (every backup carries the logs) |
+

@@ -24,7 +24,7 @@ in the build sandbox; it is listed in [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
 | FR-16 | Per-container RAM from cgroup v2 | done; path detection for systemd and cgroupfs layouts, unverified on a real host |
 | FR-17 | RAM budget warning / block | done |
 | FR-18 | System jobs (image prune, housekeeping, backup, update check) | done. Journal size is capped by the installer (journald drop-in) instead of a job |
-| FR-19 | Per-site one-shot jobs (argv only, no shell, no exec) | done |
+| FR-19 | Per-site one-shot jobs (argv only, no shell, no exec; image ENTRYPOINT is cleared) | done. Log tail per run is 16 KB (PRD said 64 KB) to bound database and backup size |
 | FR-20 | Private GHCR images via registry login | done (credentials sealed; `X-Registry-Auth` verified against a mock Docker API) |
 | FR-21 | Dashboard without a domain (self-signed HTTPS on the IP) | done as configuration; unverified in a real browser against real Caddy |
 | FR-22 | Encrypted backup to a private GitHub repo + `rustle restore` | done against a mock GitHub API |
@@ -49,3 +49,13 @@ Release build with the dashboard embedded, fake Docker/Caddy backends, after a s
 
 These do not include the real Docker/Caddy clients talking to live daemons (they add buffers, not threads); re-measure on the VPS
 (`docs/VERIFY_ON_VPS.md`, item 1).
+
+## Review
+
+An independent senior reviewer (Opus) examined the plan before coding and the finished code afterwards; all 6 HIGH and most MEDIUM
+findings were fixed with tests (see `docs/DECISIONS_ADDENDUM.md`). Known leftovers:
+
+* The installer verifies `SHA256SUMS` only; the Ed25519 signature is checked by the server when it updates itself, not by `install.sh`.
+* A one-shot container orphaned by a restart is swept once it has exited; a hung one keeps its RAM until the next boot.
+* `compat_caps` and per-site resource edits take effect on the next deploy (the UI says so).
+* Tenant containers can still reach each other on `rustle-net`.

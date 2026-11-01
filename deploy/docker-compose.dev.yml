@@ -21,8 +21,9 @@ services:
       POST: 1
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock:ro
-    ports:
-      - "127.0.0.1:2375:2375"
+    networks:
+      rustle-docker:
+        ipv4_address: 172.31.0.2
     mem_limit: 32m
     restart: unless-stopped
   caddy:
@@ -45,6 +46,11 @@ networks:
     ipam:
       config:
         - subnet: 172.30.0.0/24
+  rustle-docker:
+    name: rustle-docker
+    ipam:
+      config:
+        - subnet: 172.31.0.0/29
 volumes:
   caddy_data:
   caddy_config:

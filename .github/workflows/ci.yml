@@ -85,7 +85,6 @@ jobs:
       - uses: actions/checkout@v4
       - run: shellcheck install/*.sh deploy/prestart.sh scripts/*.sh
       - run: RUSTLE_INSTALL_DRY_RUN=1 ./install/install.sh --domain admin.example.com --email ops@example.com
-      - run: sudo apt-get install -y -qq systemd >/dev/null && systemd-analyze verify --man=no deploy/rustle.service || true
 
   real-docker:
     name: End-to-end with real Docker, socket proxy and Caddy

@@ -64,6 +64,7 @@ fn Dashboard() -> impl IntoView {
         RwSignal::new(String::new()),
         RwSignal::new(String::new()),
     );
+    let skip_dns = RwSignal::new(false);
     spawn_local(async move {
         if let Ok(s) = api::get::<SettingsDto>("/api/v1/system/settings").await {
             domain.set(s.admin_domain);
@@ -81,6 +82,7 @@ fn Dashboard() -> impl IntoView {
                 admin_domain: domain.get_untracked(),
                 acme_email: email.get_untracked(),
                 budget_override_mb: budget.get_untracked().trim().parse().ok(),
+                skip_dns_check: skip_dns.get_untracked(),
             };
             match api::call::<SettingsDto>("PUT", "/api/v1/system/settings", js_json(&req)).await {
                 Ok(_) => ctx.ok("Saved. A certificate is requested for the new domain; point its A record at this server first."),
@@ -93,6 +95,7 @@ fn Dashboard() -> impl IntoView {
             <div class="form">
                 <label>"Dashboard domain (empty = HTTPS on the server IP with a self-signed certificate)"</label>
                 <input placeholder="admin.example.com" prop:value=move || domain.get() on:input=move |e| domain.set(event_target_value(&e))/>
+                <label class="check"><input type="checkbox" prop:checked=move || skip_dns.get() on:change=move |e| skip_dns.set(event_target_checked(&e))/>" Skip the DNS check (only if you know the domain will point here)"</label>
                 <label>"Email for Let's Encrypt notices"</label>
                 <input placeholder="you@example.com" prop:value=move || email.get() on:input=move |e| email.set(event_target_value(&e))/>
                 <label>"RAM budget override in MB (empty = automatic)"</label>

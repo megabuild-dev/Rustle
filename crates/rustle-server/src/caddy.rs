@@ -67,7 +67,9 @@ pub fn base_config(p: &BaseParams) -> Value {
         &p.admin_listen
     };
     let mut server = json!({
-        "listen": [":443", ":80"],
+        // Only :443. Caddy's automatic HTTPS binds :80 itself for ACME challenges and https redirects;
+        // listening on :80 here would serve every terminal route over plain HTTP.
+        "listen": [":443"],
         "routes": [admin_route(p)],
     });
     let mut apps = json!({});
@@ -377,6 +379,15 @@ mod tests {
         assert_eq!(
             c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"],
             "internal"
+        );
+    }
+
+    #[test]
+    fn plain_http_port_is_left_to_automatic_https() {
+        let c = base_config(&params(Some("admin.example.com")));
+        assert_eq!(
+            c["apps"]["http"]["servers"]["main"]["listen"],
+            json!([":443"])
         );
     }
 

@@ -260,6 +260,9 @@ pub struct SettingsDto {
     pub admin_domain: String,
     pub acme_email: String,
     pub budget_override_mb: Option<u32>,
+    /// Save the dashboard domain even if it does not resolve to this server yet.
+    #[serde(default)]
+    pub skip_dns_check: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

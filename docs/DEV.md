@@ -33,7 +33,7 @@ Use the same topology as production, never a mounted `docker.sock`:
 | `RUSTLE_STATE_DIR` | `/var/lib/rustle` | database, binary directory |
 | `RUSTLE_DB` | `<state>/rustle.db` | SQLite file |
 | `RUSTLE_MASTER_KEY_FILE` | `/etc/rustle/master.key` | master key (hex), mode 0600 |
-| `DOCKER_HOST` | `tcp://127.0.0.1:2375` | the socket proxy (also accepts `unix:///path`) |
+| `DOCKER_HOST` | `tcp://172.31.0.2:2375` | the socket proxy (also accepts `unix:///path`) |
 | `CADDY_ADMIN_URL` | `unix:///run/rustle/caddy-admin.sock` | Caddy Admin API |
 | `RUSTLE_ADMIN_UPSTREAM` | `unix//run/rustle/rustle.sock` | how Caddy dials Rustle (Caddy syntax) |
 | `RUSTLE_NETWORK` | `rustle-net` | Docker network created by the installer |

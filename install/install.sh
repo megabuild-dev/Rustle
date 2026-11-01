@@ -47,9 +47,10 @@ write_file() {
   chmod "$2" "$1.tmp"
   mv -f "$1.tmp" "$1"
 }
-# Fetch a file shipped next to this script (when run from a checkout) or from the release.
+# Files shipped next to this script (a checkout or the release bundle): never fetched from a moving branch.
 asset() {
-  if [ -f "$SRC_DIR/../deploy/$1" ]; then cat "$SRC_DIR/../deploy/$1"; else curl -fsSL "https://raw.githubusercontent.com/$REPO/main/deploy/$1"; fi
+  [ -f "$SRC_DIR/../deploy/$1" ] || die "deploy/$1 not found: run this script from the extracted rustle-installer.tar.gz (or a git checkout)"
+  cat "$SRC_DIR/../deploy/$1"
 }
 
 [ "$DRY" = 1 ] || [ "$(id -u)" -eq 0 ] || die "run as root (sudo)"
@@ -163,22 +164,32 @@ else
   printf '%s\n' "$INIT_OUT"
   chown -R rustle:rustle /var/lib/rustle /etc/rustle
   chmod 600 /etc/rustle/master.key
-  if printf '%s' "$INIT_OUT" | grep -q 'MASTER KEY'; then
+  # The key is shown by `init` only the first time, so the acknowledgement is recorded in a marker:
+  # re-running the installer after an aborted first run asks again instead of skipping the check.
+  if [ ! -f /etc/rustle/.key-acknowledged ]; then
+    if ! printf '%s' "$INIT_OUT" | grep -q 'MASTER KEY'; then
+      printf '\nMASTER KEY (save it NOW; without it backups cannot be restored):\n  %s\n' "$("$BIN" key export)"
+    fi
     if [ "${RUSTLE_ACK_KEY:-0}" != 1 ]; then
       if [ -t 0 ]; then
-        printf '\nWithout the master key your backups cannot be restored. Type "saved" once you have stored it: '
+        printf '\nType "saved" once you have stored the master key: '
         read -r ans
-        [ "$ans" = saved ] || die "aborted: save the master key first (re-run the installer; nothing else was started)"
+        [ "$ans" = saved ] || die "aborted: save the master key first, then re-run the installer"
       else
         die "non-interactive run: set RUSTLE_ACK_KEY=1 to confirm you saved the master key shown above"
       fi
     fi
+    touch /etc/rustle/.key-acknowledged
+    chown rustle:rustle /etc/rustle/.key-acknowledged
   fi
 fi
 
 # ---- 6. network, socket proxy, Caddy ----------------------------------------------------------
 log "Docker network, socket proxy and Caddy"
 docker network inspect rustle-net >/dev/null 2>&1 || run docker network create --subnet 172.30.0.0/24 rustle-net
+# The Docker API proxy lives on its OWN bridge with a fixed address and publishes nothing: tenant
+# containers (on rustle-net) cannot route to it, and it is not reachable from other machines.
+docker network inspect rustle-docker >/dev/null 2>&1 || run docker network create --subnet 172.31.0.0/29 rustle-docker
 if [ "$DRY" = 1 ]; then
   echo "+ $BIN caddy-config > /etc/rustle/caddy.json"
 else
@@ -192,14 +203,15 @@ recreate() { # name image args...
   run docker run -d --name "$name" --restart unless-stopped "$@"
 }
 # The ONLY container that sees the Docker socket. Everything dangerous (exec, volumes, networks,
-# system) is disabled; it listens on the loopback interface only.
+# system) is disabled; it is reachable only at 172.31.0.2 from the host.
 recreate rustle-docker-proxy \
   -e CONTAINERS=1 -e IMAGES=1 -e NETWORKS=0 -e VOLUMES=0 -e EXEC=0 -e SYSTEM=0 -e EVENTS=0 -e POST=1 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro -p 127.0.0.1:2375:2375 --memory 32m \
+  --network rustle-docker --ip 172.31.0.2 --oom-score-adj -500 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro --memory 32m \
   "$PROXY_IMAGE"
 # Caddy: public 80/443, Admin API on a unix socket in /run/rustle (never on rustle-net).
 recreate rustle-caddy \
-  --network rustle-net -p 80:80 -p 443:443 --memory 96m \
+  --network rustle-net -p 80:80 -p 443:443 --memory 96m --oom-score-adj -500 \
   -v /run/rustle:/run/rustle -v /etc/rustle/caddy.json:/etc/caddy/caddy.json:ro \
   -v rustle_caddy_data:/data -v rustle_caddy_config:/config \
   "$CADDY_IMAGE" caddy run --config /etc/caddy/caddy.json --resume

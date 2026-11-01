@@ -77,7 +77,7 @@ impl Config {
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/etc/rustle/master.key")),
             docker: Endpoint::parse(
-                &get("DOCKER_HOST").unwrap_or_else(|| "tcp://127.0.0.1:2375".into()),
+                &get("DOCKER_HOST").unwrap_or_else(|| "tcp://172.31.0.2:2375".into()),
             ),
             caddy_admin: Endpoint::parse(
                 &get("CADDY_ADMIN_URL")

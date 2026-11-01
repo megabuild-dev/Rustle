@@ -113,6 +113,20 @@ impl HttpGithub {
     }
 }
 
+/// Release assets redirect to GitHub's own CDN over https; nothing else is followed.
+fn redirect_allowed(url: &str, allow_plain: bool) -> bool {
+    if allow_plain && url.starts_with("http://") {
+        return true;
+    }
+    let Some(rest) = url.strip_prefix("https://") else {
+        return false;
+    };
+    let host = rest.split(['/', ':']).next().unwrap_or("");
+    host == "github.com"
+        || host.ends_with(".github.com")
+        || host.ends_with(".githubusercontent.com")
+}
+
 fn enc_path(p: &str) -> String {
     p.split('/')
         .map(|s| urlencoding::encode(s).into_owned())
@@ -245,6 +259,8 @@ impl Github for HttpGithub {
 
     async fn download(&self, url: &str, max_bytes: usize) -> GhResult<Vec<u8>> {
         let mut url = url.to_string();
+        // Plain http is only ever used against local mock servers in tests.
+        let allow_plain = url.starts_with("http://");
         for _ in 0..5 {
             let (target, path) =
                 Target::from_url(&url).map_err(|e| GhError::Unreachable(e.to_string()))?;
@@ -267,6 +283,11 @@ impl Github for HttpGithub {
                 } else {
                     loc
                 };
+                if !redirect_allowed(&url, allow_plain) {
+                    return Err(GhError::Bad(
+                        "refusing to follow a redirect to an untrusted location".into(),
+                    ));
+                }
                 continue;
             }
             let r = Self::check(r)?;
@@ -457,6 +478,23 @@ mod tests {
             .find(|r| r.method == "DELETE")
             .unwrap();
         assert_eq!(del.json()["sha"], "s1");
+    }
+
+    #[test]
+    fn redirects_only_to_github_over_https() {
+        assert!(redirect_allowed(
+            "https://objects.githubusercontent.com/x",
+            false
+        ));
+        assert!(redirect_allowed(
+            "https://github.com/o/r/releases/download/v1/a",
+            false
+        ));
+        assert!(!redirect_allowed("http://github.com/x", false));
+        assert!(!redirect_allowed("https://evil.example.com/x", false));
+        assert!(!redirect_allowed("https://github.com.evil.com/x", false));
+        assert!(!redirect_allowed("https://evilgithub.com/x", false));
+        assert!(redirect_allowed("http://127.0.0.1:1/x", true));
     }
 
     #[tokio::test]

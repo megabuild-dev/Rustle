@@ -10,10 +10,10 @@ deploy tokens, the GitHub backup token.
 ## Trust boundaries
 ```
 Internet --443/80--> Caddy (container, rustle-net) --unix socket--> rustle-admin (host, user "rustle", systemd sandbox)
-                                |                                        |--127.0.0.1:2375--> docker-socket-proxy --docker.sock--> dockerd
+                                |                                        |--172.31.0.2:2375--> docker-socket-proxy --docker.sock--> dockerd
                                 +--rustle-net--> tenant containers       +--unix socket--> Caddy Admin API
 ```
-Only Caddy listens publicly. The Docker proxy is published on host loopback only. Caddy's Admin API and Rustle's own listener
+Only Caddy listens publicly. The Docker proxy sits on its own bridge (`rustle-docker`, 172.31.0.2) and publishes no port: tenants on `rustle-net` cannot route to it and it is not reachable from other machines. Caddy's Admin API and Rustle's own listener
 are unix sockets inside `/run/rustle` (mode 0750, owner `rustle`), not on `rustle-net`, so tenant containers cannot reach
 them. A loopback TCP listener (`127.0.0.1:3000`) exists for SSH-tunnel access.
 

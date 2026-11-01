@@ -26,3 +26,10 @@ through the rest on a fresh Ubuntu 24.04 VPS (1 vCPU / 1 GB).
 | 18 | Reboot recovery | `reboot`; sites, routes and the dashboard return unattended | Check `Restart=always`, Docker `live-restore`, `unless-stopped` |
 | 19 | Zero-downtime deploy under load, with RAM headroom | enable per site, `hey`/`wrk` while deploying | Keep it off by default until this passes |
 | 20 | `memory_swappiness` (omitted by design) | n/a | The original spec required `0`; cgroup v2 has no such control |
+| 21 | Caddy accepts the admin API call from Rustle: the unix-socket request carries `Host: 127.0.0.1` (Caddy rejects other Host values on its admin endpoint) | Create a site; `journalctl -u rustle` shows no `gateway` errors | If Caddy still answers `403 host not allowed`, adjust the host sent in `httpc.rs` |
+| 22 | Port 80 never serves a site or the dashboard over plain HTTP, only the redirect and ACME challenges (`listen` is `:443` only) | `curl -i http://<ip>/` and `http://<site-domain>/` | Add an explicit redirect server on :80 |
+| 23 | Bare-IP HTTPS: `certificates.automate` + `tls internal` + `default_sni` produce a working certificate | open `https://<ip>`, accept the warning once | Use a `<ip>.sslip.io` name and a normal certificate |
+| 24 | The host can reach the proxy at `172.31.0.2:2375` (own bridge, nothing published) and tenants cannot | e2e "isolation" checks | Fall back to publishing on loopback plus an `iptables -t raw` DROP for non-loopback sources |
+| 25 | The Docker proxy tag `tecnativa/docker-socket-proxy:0.3.0` exists and `POST=1` also permits `DELETE` | `docker pull`, then a delete through the proxy | Pin the correct tag, or use `wollomatic/socket-proxy` |
+| 26 | Updating: tag `v0.0.1` then `v0.0.2`; break `v0.0.2` on purpose; the previous binary comes back after 4 failed starts and only while `bin/update-pending` exists | `ls /var/lib/rustle/bin`, `journalctl -t rustle` | n/a |
+

@@ -212,7 +212,9 @@ async fn login(
     Ok(r)
 }
 
-async fn logout(_a: Admin) -> Response {
+async fn logout(State(s): State<S>, _a: Admin) -> Response {
+    // A signed token stays valid until expiry unless the version it carries is retired.
+    let _ = s.store.bump_token_version();
     let mut r = StatusCode::NO_CONTENT.into_response();
     r.headers_mut().insert(
         header::SET_COOKIE,
@@ -352,6 +354,7 @@ async fn get_settings(State(s): State<S>, _a: Admin) -> AppResult<Json<SettingsD
             .store
             .setting("budget_override_mb")?
             .and_then(|v| v.parse().ok()),
+        skip_dns_check: false,
     }))
 }
 
@@ -367,6 +370,10 @@ async fn put_settings(
         }
         if s.store.list_sites()?.iter().any(|x| x.domain == domain) {
             return Err(AppError::conflict("that domain is used by a site"));
+        }
+        // A typo here would host-match the dashboard route and lock the operator out of it.
+        if !req.skip_dns_check && sites::admin_domain(&s).as_deref() != Some(domain.as_str()) {
+            sites::check_dns(&s, &domain).await?;
         }
     }
     let email = req.acme_email.trim().to_string();
@@ -411,9 +418,21 @@ async fn put_backup(
 }
 
 async fn run_backup(State(s): State<S>, _a: Admin) -> AppResult<Json<serde_json::Value>> {
-    let msg = backup::run(&s)
-        .await
-        .map_err(|e| AppError::unprocessable("backup_failed", e))?;
+    const KEY: &str = "manual-backup";
+    if !s
+        .running_jobs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(KEY.into())
+    {
+        return Err(AppError::conflict("a backup is already running"));
+    }
+    let result = backup::run(&s).await;
+    s.running_jobs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(KEY);
+    let msg = result.map_err(|e| AppError::unprocessable("backup_failed", e))?;
     Ok(Json(serde_json::json!({ "message": msg })))
 }
 
@@ -1019,6 +1038,18 @@ mod tests {
         assert_eq!(r.status, 204);
         let sc = r.headers[header::SET_COOKIE].to_str().unwrap();
         assert!(sc.contains("Max-Age=0") && sc.contains("HttpOnly"));
+        assert!(
+            sc.starts_with("__Host-rustle_session="),
+            "host-pinned cookie: {sc}"
+        );
+        // logging out revokes the token itself, not just the browser's copy
+        assert_eq!(c.get("/api/v1/auth/me").await.status, 401);
+        assert_eq!(c.get("/api/v1/sites").await.status, 401);
+    }
+
+    #[tokio::test]
+    async fn me_returns_a_fresh_csrf_for_a_live_session() {
+        let (_e, c) = logged_in().await;
         let me = c.get("/api/v1/auth/me").await;
         assert_eq!(me.status, 200);
         assert!(!me.json::<LoginResp>().csrf.is_empty());

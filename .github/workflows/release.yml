@@ -1,7 +1,7 @@
 name: Release
 
 # Tag a version (v0.1.0) whose number matches crates/rustle-server/Cargo.toml.
-# Needs: repository secret RUSTLE_SIGNING_KEY (PEM, see docs/RELEASING.md) and
+# Needs: secret RUSTLE_SIGNING_KEY in the protected "release" environment (PEM, see docs/RELEASING.md) and
 #        repository variable RUSTLE_UPDATE_PUBKEY_HEX (64 hex chars, the matching public key).
 on:
   push:
@@ -42,32 +42,38 @@ jobs:
           [ -n "$RUSTLE_UPDATE_PUBKEY_HEX" ] || { echo "RUSTLE_UPDATE_PUBKEY_HEX variable is not set"; exit 1; }
           cargo build --release -p rustle-server
           cp target/release/rustle "rustle-${{ matrix.arch }}-linux"
-      - name: Sign (ed25519, raw 64-byte signature)
-        env:
-          KEY: ${{ secrets.RUSTLE_SIGNING_KEY }}
-        run: |
-          umask 077
-          printf '%s\n' "$KEY" > key.pem
-          openssl pkeyutl -sign -rawin -inkey key.pem -in "rustle-${{ matrix.arch }}-linux" -out "rustle-${{ matrix.arch }}-linux.sig"
-          openssl pkey -in key.pem -pubout -out pub.pem
-          openssl pkeyutl -verify -rawin -pubin -inkey pub.pem -in "rustle-${{ matrix.arch }}-linux" -sigfile "rustle-${{ matrix.arch }}-linux.sig"
-          rm -f key.pem
       - uses: actions/upload-artifact@v4
         with:
           name: rustle-${{ matrix.arch }}
-          path: |
-            rustle-${{ matrix.arch }}-linux
-            rustle-${{ matrix.arch }}-linux.sig
+          path: rustle-${{ matrix.arch }}-linux
 
+  # The signing key never shares a job with build tooling (cargo, trunk and their dependencies):
+  # this job only signs files it downloads, and requires the protected "release" environment.
   publish:
     needs: build
     runs-on: ubuntu-latest
+    environment: release
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist
           merge-multiple: true
+      - name: Sign (Ed25519 over a manifest of version, architecture and SHA-256)
+        env:
+          KEY: ${{ secrets.RUSTLE_SIGNING_KEY }}
+          TAG: ${{ github.ref_name }}
+        run: |
+          umask 077
+          printf '%s\n' "$KEY" > "$RUNNER_TEMP/key.pem"
+          openssl pkey -in "$RUNNER_TEMP/key.pem" -pubout -out "$RUNNER_TEMP/pub.pem"
+          for arch in x86_64 aarch64; do
+            f="dist/rustle-$arch-linux"
+            printf 'rustle-release-v1\n%s\n%s\n%s\n' "$TAG" "$arch" "$(sha256sum "$f" | cut -d' ' -f1)" > "$RUNNER_TEMP/manifest-$arch.txt"
+            openssl pkeyutl -sign -rawin -inkey "$RUNNER_TEMP/key.pem" -in "$RUNNER_TEMP/manifest-$arch.txt" -out "$f.sig"
+            openssl pkeyutl -verify -rawin -pubin -inkey "$RUNNER_TEMP/pub.pem" -in "$RUNNER_TEMP/manifest-$arch.txt" -sigfile "$f.sig"
+          done
+          rm -f "$RUNNER_TEMP/key.pem"
       - name: Checksums and installer bundle
         run: |
           cd dist

@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 const AAD: &[u8] = b"rustle-backup-v1";
 const KEEP: usize = 14;
+const MAX_DB_BYTES: usize = 16 * 1024 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 struct Stored {
@@ -169,7 +170,10 @@ async fn do_backup(
         .db_path()
         .ok_or("database is not file backed")?
         .to_path_buf();
-    let tmp = state.cfg.state_dir.join("backup-tmp.db");
+    let tmp = state
+        .cfg
+        .state_dir
+        .join(format!("backup-tmp-{}.db", crate::util::rand_hex(4)));
     let (db2, tmp2) = (db.clone(), tmp.clone());
     // Separate read-only connection on the blocking pool: the shared connection stays free.
     tokio::task::spawn_blocking(move || snapshot_to(&db2, &tmp2))
@@ -178,7 +182,16 @@ async fn do_backup(
         .map_err(|e| e.message)?;
     let plain = tokio::fs::read(&tmp).await.map_err(|e| e.to_string());
     let _ = tokio::fs::remove_file(&tmp).await;
-    let enc = state.key.seal(&plain?, AAD);
+    let plain = plain?;
+    // The whole file is held in memory (plain + ciphertext + base64): refuse when it is unreasonably large.
+    if plain.len() > MAX_DB_BYTES {
+        return Err(format!(
+            "database is {} MiB, above the {} MiB backup limit",
+            plain.len() >> 20,
+            MAX_DB_BYTES >> 20
+        ));
+    }
+    let enc = state.key.seal(&plain, AAD);
     state
         .github
         .put_file(tok, &cfg.repo, &cfg.branch, remote, &enc, "rustle backup")
@@ -239,7 +252,19 @@ pub fn restore_to(
     for ext in ["-wal", "-shm"] {
         let _ = std::fs::remove_file(format!("{}{ext}", dest.display()));
     }
-    std::fs::write(dest, plain).map_err(|e| e.to_string())
+    // Write next to the destination and rename, so a crash never leaves a half-written database,
+    // and give the file to the owner of its directory: `rustle restore` is typically run with sudo,
+    // while the service runs as an unprivileged user that must be able to open it read-write.
+    let tmp = dest.with_extension("restore-tmp");
+    std::fs::write(&tmp, plain).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    if let Some(dir) = dest.parent() {
+        use std::os::unix::fs::MetadataExt;
+        if let Ok(m) = std::fs::metadata(dir) {
+            let _ = std::os::unix::fs::chown(&tmp, Some(m.uid()), Some(m.gid()));
+        }
+    }
+    std::fs::rename(&tmp, dest).map_err(|e| e.to_string())
 }
 
 pub fn history(state: &AppState) -> AppResult<Vec<rustle_types::BackupRunDto>> {
@@ -383,7 +408,11 @@ mod tests {
         let other = MasterKey::from_bytes([1; 32]);
         assert!(restore_to(&other, &blob, &dir.path().join("x.db"), false).is_err());
         // no temp snapshot left behind
-        assert!(!st.cfg.state_dir.join("backup-tmp.db").exists());
+        assert!(std::fs::read_dir(&st.cfg.state_dir).unwrap().all(|e| !e
+            .unwrap()
+            .file_name()
+            .to_string_lossy()
+            .starts_with("backup-tmp")));
         let h = history(&st).unwrap();
         assert_eq!(h[0].status, "ok");
     }

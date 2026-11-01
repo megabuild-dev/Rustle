@@ -10,9 +10,12 @@ openssl pkey -in key.pem -pubout -outform DER | tail -c 32 | xxd -p -c 64
 # 3. private key goes into the repository SECRET RUSTLE_SIGNING_KEY (paste the PEM)
 ```
 
+Put the private key in a GitHub **environment** named `release` (Settings > Environments, add required reviewers), not in a plain
+repository secret: the signing job is the only one that can read it, and it never runs build tooling.
+
 Then bump `version` in the workspace `Cargo.toml`, commit, and push a tag that matches (`v0.1.1`). The workflow builds the
 dashboard and the server for x86_64 and aarch64, embeds the public key (`RUSTLE_UPDATE_PUBKEY_HEX`, read at compile time), signs
-each binary (`rustle-<arch>-linux.sig`, raw 64 bytes), verifies the signature, and publishes the binaries, `SHA256SUMS` and
+a manifest per binary (`rustle-release-v1`, tag, architecture, SHA-256; written to `rustle-<arch>-linux.sig`, raw 64 bytes), verifies the signature, and publishes the binaries, `SHA256SUMS` and
 `rustle-installer.tar.gz` to a GitHub release.
 
 Installed servers see the release in Settings > Updates and verify the signature against the key baked into the binary

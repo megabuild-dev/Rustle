@@ -28,6 +28,16 @@ pub fn is_newer(latest: &str, current: &str) -> bool {
     matches!((parse_version(latest), parse_version(current)), (Some(l), Some(c)) if l > c)
 }
 
+/// What the release key signs: version, architecture and the binary's SHA-256. Signing the bytes
+/// alone would let an attacker replay an older, vulnerable signed binary under a newer tag.
+pub fn manifest(tag: &str, arch: &str, bin: &[u8]) -> Vec<u8> {
+    format!(
+        "rustle-release-v1\n{tag}\n{arch}\n{}\n",
+        crate::crypto::sha256_hex(bin)
+    )
+    .into_bytes()
+}
+
 pub fn asset_name() -> String {
     format!("rustle-{}-linux", std::env::consts::ARCH)
 }
@@ -117,7 +127,11 @@ pub async fn apply(state: &Arc<AppState>) -> AppResult<String> {
         let sig = decode_signature(&sig_raw).ok_or_else(|| {
             AppError::unprocessable("bad_signature", "signature file is malformed")
         })?;
-        if !ed25519_verify(&pubkey, &bin, &sig) {
+        if !ed25519_verify(
+            &pubkey,
+            &manifest(&rel.tag, std::env::consts::ARCH, &bin),
+            &sig,
+        ) {
             return Err(AppError::unprocessable(
                 "bad_signature",
                 "signature verification failed; refusing to install",
@@ -148,6 +162,8 @@ pub async fn apply(state: &Arc<AppState>) -> AppResult<String> {
 pub fn install(dir: &std::path::Path, bin: &[u8]) -> std::io::Result<()> {
     use std::os::unix::fs::PermissionsExt;
     std::fs::create_dir_all(dir)?;
+    // Arms the boot-attempt revert guard (deploy/prestart.sh) for exactly this update.
+    std::fs::write(dir.join("update-pending"), "1")?;
     let cur = dir.join("rustle");
     let new = dir.join("rustle.new");
     std::fs::write(&new, bin)?;
@@ -213,7 +229,7 @@ mod tests {
         let (kp, pubkey) = keypair();
         let e = env_with_key(pubkey);
         let bin = fake_elf("new");
-        let sig = kp.sign(&bin);
+        let sig = kp.sign(&manifest("v9.9.9", std::env::consts::ARCH, &bin));
         let name = asset_name();
         e.github.set_release(
             "v9.9.9",
@@ -261,7 +277,12 @@ mod tests {
             "v9.9.9",
             &[
                 (name.as_str(), bin.as_slice()),
-                (&format!("{name}.sig"), other.sign(&bin).as_ref()),
+                (
+                    &format!("{name}.sig"),
+                    other
+                        .sign(&manifest("v9.9.9", std::env::consts::ARCH, &bin))
+                        .as_ref(),
+                ),
             ],
         );
         let err = apply(&e.state).await.unwrap_err();
@@ -276,7 +297,7 @@ mod tests {
         );
         // binary modified after signing
         let e = env_with_key(pubkey);
-        let sig = kp.sign(&bin);
+        let sig = kp.sign(&manifest("v9.9.9", std::env::consts::ARCH, &bin));
         let mut tampered = bin.clone();
         tampered[10] ^= 1;
         e.github.set_release(
@@ -284,6 +305,17 @@ mod tests {
             &[
                 (name.as_str(), tampered.as_slice()),
                 (&format!("{name}.sig"), sig.as_ref()),
+            ],
+        );
+        assert_eq!(apply(&e.state).await.unwrap_err().code, "bad_signature");
+        // a signature issued for another version cannot be replayed under this tag
+        let e = env_with_key(pubkey);
+        let replay = kp.sign(&manifest("v0.0.5", std::env::consts::ARCH, &bin));
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), bin.as_slice()),
+                (&format!("{name}.sig"), replay.as_ref()),
             ],
         );
         assert_eq!(apply(&e.state).await.unwrap_err().code, "bad_signature");
@@ -299,7 +331,11 @@ mod tests {
             "v9.9.9",
             &[
                 (name.as_str(), junk.as_slice()),
-                (&format!("{name}.sig"), kp.sign(&junk).as_ref()),
+                (
+                    &format!("{name}.sig"),
+                    kp.sign(&manifest("v9.9.9", std::env::consts::ARCH, &junk))
+                        .as_ref(),
+                ),
             ],
         );
         assert_eq!(apply(&e.state).await.unwrap_err().code, "not_elf");

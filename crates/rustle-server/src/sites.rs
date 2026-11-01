@@ -156,7 +156,7 @@ pub fn load_env(state: &AppState, site_id: &str) -> AppResult<Vec<EnvVar>> {
         .collect()
 }
 
-async fn check_dns(state: &AppState, domain: &str) -> AppResult<()> {
+pub async fn check_dns(state: &AppState, domain: &str) -> AppResult<()> {
     let Some(expected) = public_ip(state) else {
         tracing::warn!("public IP unknown, skipping DNS check for {domain}");
         return Ok(());

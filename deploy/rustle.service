@@ -26,6 +26,7 @@ MemoryHigh=32M
 MemoryMax=48M
 CPUQuota=30%
 TasksMax=64
+OOMScoreAdjust=-500
 
 # Sandbox. The admin needs no privileges at all: it talks to a local socket proxy and to Caddy's socket.
 NoNewPrivileges=true

@@ -357,6 +357,14 @@ impl Store {
         Ok(())
     }
 
+    pub fn bump_token_version(&self) -> AppResult<()> {
+        self.c().execute(
+            "UPDATE admin SET token_version=token_version+1 WHERE id=1",
+            [],
+        )?;
+        Ok(())
+    }
+
     /// Changing the password invalidates every existing session.
     pub fn set_admin_password(&self, hash: &str) -> AppResult<()> {
         self.c().execute(

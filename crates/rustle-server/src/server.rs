@@ -101,6 +101,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         tokio::spawn(async move {
             tokio::time::sleep(Duration::from_secs(30)).await;
             let _ = std::fs::write(dir.join("boot_attempts"), "0");
+            // The new binary proved itself: disarm the revert guard.
+            let _ = std::fs::remove_file(dir.join("update-pending"));
         });
     }
 

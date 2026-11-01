@@ -5,7 +5,7 @@
 #
 #   RUSTLE_BIN=target/release/rustle ./scripts/e2e-real.sh
 #
-# Needs: docker, curl, python3; cgroup v2; ports 80/443 and 127.0.0.1:2375/3000 free; network access to
+# Needs: docker, curl, python3; cgroup v2; ports 80/443 and 127.0.0.1:3000 free, subnets 172.30.0.0/24 and 172.31.0.0/29 unused; network access to
 # pull images. E2E_IMAGE must be a PUBLIC ghcr.io image that listens on E2E_PORT.
 set -euo pipefail
 
@@ -31,7 +31,7 @@ cleanup() {
   [ -n "${RUSTLE_PID:-}" ] && kill "$RUSTLE_PID" 2>/dev/null
   docker ps -aq --filter label=rustle.managed=1 | xargs -r docker rm -f >/dev/null 2>&1
   docker rm -f rustle-caddy rustle-docker-proxy >/dev/null 2>&1
-  docker network rm rustle-net >/dev/null 2>&1
+  docker network rm rustle-net rustle-docker >/dev/null 2>&1
   docker volume rm rustle_e2e_data rustle_e2e_config >/dev/null 2>&1
   rm -rf "$D"
 }
@@ -41,12 +41,14 @@ echo "== topology"
 mkdir -p "$RUN" "$D/state"
 chmod 750 "$RUN"
 docker network create --subnet 172.30.0.0/24 rustle-net >/dev/null
+docker network create --subnet 172.31.0.0/29 rustle-docker >/dev/null
 docker run -d --name rustle-docker-proxy -e CONTAINERS=1 -e IMAGES=1 -e NETWORKS=0 -e VOLUMES=0 -e EXEC=0 -e SYSTEM=0 -e EVENTS=0 -e POST=1 \
-  -v /var/run/docker.sock:/var/run/docker.sock:ro -p 127.0.0.1:2375:2375 "${PROXY_IMAGE:-tecnativa/docker-socket-proxy:0.3.0}" >/dev/null
+  --network rustle-docker --ip 172.31.0.2 \
+  -v /var/run/docker.sock:/var/run/docker.sock:ro "${PROXY_IMAGE:-tecnativa/docker-socket-proxy:0.3.0}" >/dev/null
 
 export RUSTLE_STATE_DIR="$D/state" RUSTLE_MASTER_KEY_FILE="$D/state/master.key" RUSTLE_BIND=127.0.0.1:3000
 export RUSTLE_SOCKET="$RUN/rustle.sock" RUSTLE_ADMIN_UPSTREAM="unix//run/rustle/rustle.sock"
-export DOCKER_HOST=tcp://127.0.0.1:2375 CADDY_ADMIN_URL="unix://$RUN/caddy-admin.sock"
+export DOCKER_HOST=tcp://172.31.0.2:2375 CADDY_ADMIN_URL="unix://$RUN/caddy-admin.sock"
 INIT="$("$BIN" init)"
 PASSWORD="$(printf '%s' "$INIT" | sed -n 's/.*password: //p')"
 "$BIN" caddy-config > "$D/caddy.json"
@@ -97,16 +99,19 @@ for _ in $(seq 1 30); do [ "$(code -k --resolve e2e.localhost:443:127.0.0.1 http
 [ "$(code -k --resolve e2e.localhost:443:127.0.0.1 https://e2e.localhost/)" = 200 ] && ok "https://e2e.localhost serves the app" || bad "app not reachable through Caddy"
 
 echo "== socket proxy ACLs"
-[ "$(code -X POST http://127.0.0.1:2375/containers/"$CID"/exec -H 'content-type: application/json' -d '{}')" = 403 ] && ok "exec is denied" || bad "exec NOT denied"
-[ "$(code http://127.0.0.1:2375/volumes)" = 403 ] && ok "volumes are denied" || bad "volumes NOT denied"
-[ "$(code http://127.0.0.1:2375/networks)" = 403 ] && ok "networks are denied" || bad "networks NOT denied"
-[ "$(code http://127.0.0.1:2375/info)" = 403 ] && ok "system info is denied" || bad "system info NOT denied"
-[ "$(code http://127.0.0.1:2375/containers/json)" = 200 ] && ok "container listing works" || bad "container listing"
+[ "$(code -X POST http://172.31.0.2:2375/containers/"$CID"/exec -H 'content-type: application/json' -d '{}')" = 403 ] && ok "exec is denied" || bad "exec NOT denied"
+[ "$(code http://172.31.0.2:2375/volumes)" = 403 ] && ok "volumes are denied" || bad "volumes NOT denied"
+[ "$(code http://172.31.0.2:2375/networks)" = 403 ] && ok "networks are denied" || bad "networks NOT denied"
+[ "$(code http://172.31.0.2:2375/info)" = 403 ] && ok "system info is denied" || bad "system info NOT denied"
+[ "$(code http://172.31.0.2:2375/containers/json)" = 200 ] && ok "container listing works" || bad "container listing"
 
 echo "== isolation"
 check "Caddy admin API is not on TCP" bash -c '! curl -sS --max-time 3 http://127.0.0.1:2019/config/'
 check "a tenant cannot reach the Rustle API" bash -c "! docker run --rm --network rustle-net alpine wget -q -T 3 -O- http://172.30.0.1:3000/healthz"
-check "a tenant cannot reach the Docker proxy" bash -c "! docker run --rm --network rustle-net alpine wget -q -T 3 -O- http://172.30.0.1:2375/_ping"
+check "a tenant cannot reach the Docker proxy (gateway)" bash -c "! docker run --rm --network rustle-net alpine wget -q -T 3 -O- http://172.30.0.1:2375/_ping"
+check "a tenant cannot reach the Docker proxy (its own address)" bash -c "! docker run --rm --network rustle-net alpine wget -q -T 3 -O- http://172.31.0.2:2375/_ping"
+check "the proxy publishes no port on the host" bash -c "[ -z \"\$(docker port rustle-docker-proxy)\" ]"
+check "plain HTTP never serves the app (only a redirect)" bash -c "[ \"\$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 -H 'Host: e2e.localhost' http://127.0.0.1/)\" != 200 ]"
 check "a tenant cannot reach Caddy's admin port" bash -c "! docker run --rm --network rustle-net alpine wget -q -T 3 -O- http://rustle-caddy:2019/config/"
 check "Rustle socket is not world accessible" bash -c "[ \"\$(stat -c %a '$RUN/rustle.sock')\" = 660 ]"
 
