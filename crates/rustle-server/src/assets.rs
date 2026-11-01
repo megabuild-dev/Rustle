@@ -6,6 +6,9 @@ use axum::http::{header, HeaderMap, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use rust_embed::RustEmbed;
 
+/// Shown when the binary was built without the dashboard (`scripts/build-ui.sh` not run).
+const FALLBACK_INDEX: &str = "<!doctype html><meta charset=utf-8><title>Rustle</title><body style=\"font-family:system-ui;background:#0b1020;color:#e6e9f2;padding:2rem\"><h1>Rustle</h1><p>The dashboard is not built into this binary. Run <code>scripts/build-ui.sh</code> and rebuild.</p><p>The API is available under <code>/api/v1</code>.</p></body>";
+
 #[derive(RustEmbed)]
 #[folder = "../../ui-dist/"]
 struct Assets;
@@ -49,8 +52,10 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
         path = "index.html".into();
         file = Assets::get(&path);
     }
-    let Some(plain) = file else {
-        return StatusCode::NOT_FOUND.into_response();
+    let plain: Vec<u8> = match file {
+        Some(f) => f.data.into_owned(),
+        None if path == "index.html" => FALLBACK_INDEX.as_bytes().to_vec(),
+        None => return StatusCode::NOT_FOUND.into_response(),
     };
     let mut builder = Response::builder().header(header::CONTENT_TYPE, mime(&path)).header(header::VARY, "accept-encoding");
     builder = if path == "index.html" {
@@ -64,10 +69,10 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
                 builder = builder.header(header::CONTENT_ENCODING, "br");
                 br.data.into_owned()
             }
-            None => plain.data.into_owned(),
+            None => plain,
         }
     } else {
-        plain.data.into_owned()
+        plain
     };
     builder.body(Body::from(body)).unwrap_or_else(|_| StatusCode::INTERNAL_SERVER_ERROR.into_response())
 }
