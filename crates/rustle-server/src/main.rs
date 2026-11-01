@@ -26,17 +26,35 @@ fn runtime() -> tokio::runtime::Runtime {
 }
 
 fn init_logging() {
-    let level = match std::env::var("RUST_LOG").unwrap_or_default().to_ascii_lowercase().as_str() {
+    let level = match std::env::var("RUST_LOG")
+        .unwrap_or_default()
+        .to_ascii_lowercase()
+        .as_str()
+    {
         "trace" => tracing::Level::TRACE,
         "debug" => tracing::Level::DEBUG,
         "warn" => tracing::Level::WARN,
         "error" => tracing::Level::ERROR,
         _ => tracing::Level::INFO,
     };
-    tracing_subscriber::fmt().with_max_level(level).with_target(false).without_time().init();
+    tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_target(false)
+        .without_time()
+        .init();
+}
+
+/// One malloc arena: the default (8 x cores) multiplies resident memory for no benefit here.
+fn tune_allocator() {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // SAFETY: mallopt is called once at startup before any other thread exists.
+    unsafe {
+        libc::mallopt(libc::M_ARENA_MAX, 1);
+    }
 }
 
 fn main() -> ExitCode {
+    tune_allocator();
     let args: Vec<String> = std::env::args().skip(1).collect();
     let cfg = Config::from_env();
     match args.first().map(String::as_str) {
@@ -73,7 +91,11 @@ fn main() -> ExitCode {
                 eprintln!("usage: rustle restore <file> [--force]");
                 return ExitCode::from(2);
             };
-            match cli::restore(&cfg, std::path::Path::new(file), args.iter().any(|a| a == "--force")) {
+            match cli::restore(
+                &cfg,
+                std::path::Path::new(file),
+                args.iter().any(|a| a == "--force"),
+            ) {
                 Ok(()) => {
                     println!("restored into {}", cfg.db_path.display());
                     ExitCode::SUCCESS
@@ -84,16 +106,18 @@ fn main() -> ExitCode {
                 }
             }
         }
-        Some("key") if args.get(1).map(String::as_str) == Some("export") => match cli::key_export(&cfg) {
-            Ok(k) => {
-                println!("{k}");
-                ExitCode::SUCCESS
+        Some("key") if args.get(1).map(String::as_str) == Some("export") => {
+            match cli::key_export(&cfg) {
+                Ok(k) => {
+                    println!("{k}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
             }
-            Err(e) => {
-                eprintln!("error: {e}");
-                ExitCode::from(1)
-            }
-        },
+        }
         Some("caddy-config") => match cli::caddy_config(&cfg) {
             Ok(j) => {
                 println!("{j}");

@@ -31,7 +31,11 @@ pub fn parse_meminfo(s: &str) -> MemInfo {
 /// Returns (idle, total) jiffies of the aggregate `cpu` line.
 pub fn parse_cpu(stat: &str) -> Option<(u64, u64)> {
     let line = stat.lines().find(|l| l.starts_with("cpu "))?;
-    let v: Vec<u64> = line.split_whitespace().skip(1).filter_map(|x| x.parse().ok()).collect();
+    let v: Vec<u64> = line
+        .split_whitespace()
+        .skip(1)
+        .filter_map(|x| x.parse().ok())
+        .collect();
     if v.len() < 4 {
         return None;
     }
@@ -40,7 +44,11 @@ pub fn parse_cpu(stat: &str) -> Option<(u64, u64)> {
 }
 
 pub fn parse_uptime(s: &str) -> u64 {
-    s.split_whitespace().next().and_then(|x| x.parse::<f64>().ok()).map(|f| f as u64).unwrap_or(0)
+    s.split_whitespace()
+        .next()
+        .and_then(|x| x.parse::<f64>().ok())
+        .map(|f| f as u64)
+        .unwrap_or(0)
 }
 
 pub fn parse_vmrss_kb(status: &str) -> u64 {
@@ -48,11 +56,15 @@ pub fn parse_vmrss_kb(status: &str) -> u64 {
 }
 
 pub fn meminfo(proc_root: &Path) -> MemInfo {
-    std::fs::read_to_string(proc_root.join("meminfo")).map(|s| parse_meminfo(&s)).unwrap_or_default()
+    std::fs::read_to_string(proc_root.join("meminfo"))
+        .map(|s| parse_meminfo(&s))
+        .unwrap_or_default()
 }
 
 pub fn self_rss_kb(proc_root: &Path) -> u64 {
-    std::fs::read_to_string(proc_root.join("self/status")).map(|s| parse_vmrss_kb(&s)).unwrap_or(0)
+    std::fs::read_to_string(proc_root.join("self/status"))
+        .map(|s| parse_vmrss_kb(&s))
+        .unwrap_or(0)
 }
 
 #[derive(Default)]
@@ -62,7 +74,9 @@ pub struct Sampler {
 
 impl Sampler {
     pub fn cpu_percent(&mut self, proc_root: &Path) -> f32 {
-        let cur = std::fs::read_to_string(proc_root.join("stat")).ok().and_then(|s| parse_cpu(&s));
+        let cur = std::fs::read_to_string(proc_root.join("stat"))
+            .ok()
+            .and_then(|s| parse_cpu(&s));
         let Some((idle, total)) = cur else { return 0.0 };
         let pct = match self.prev {
             Some((pi, pt)) if total > pt => {
@@ -80,7 +94,9 @@ impl Sampler {
 /// (total_gb, used_gb) of the filesystem holding `path`.
 pub fn disk(path: &Path) -> (f32, f32) {
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else { return (0.0, 0.0) };
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return (0.0, 0.0);
+    };
     // SAFETY: `c` is a valid NUL-terminated path and `s` is a properly sized, zeroed out-parameter.
     unsafe {
         let mut s: libc::statvfs = std::mem::zeroed();
@@ -99,7 +115,9 @@ pub fn disk(path: &Path) -> (f32, f32) {
 /// and cgroupfs layouts.
 pub fn container_mem_mb(cgroup_root: &Path, container_id: &str) -> Option<u32> {
     let candidates = [
-        cgroup_root.join(format!("system.slice/docker-{container_id}.scope/memory.current")),
+        cgroup_root.join(format!(
+            "system.slice/docker-{container_id}.scope/memory.current"
+        )),
         cgroup_root.join(format!("docker/{container_id}/memory.current")),
     ];
     for p in candidates {
@@ -119,7 +137,9 @@ pub fn budget_mb(mem: &MemInfo, base_used_mb: Option<u32>, override_mb: Option<u
         return o;
     }
     let total = (mem.total_kb / 1024) as u32;
-    total.saturating_sub(base_used_mb.unwrap_or(250)).saturating_sub(64)
+    total
+        .saturating_sub(base_used_mb.unwrap_or(250))
+        .saturating_sub(64)
 }
 
 pub fn fill_system_stats(s: &mut SystemStats, proc_root: &Path, state_dir: &Path) {
@@ -128,7 +148,9 @@ pub fn fill_system_stats(s: &mut SystemStats, proc_root: &Path, state_dir: &Path
     s.mem_used_mb = m.total_kb.saturating_sub(m.available_kb) / 1024;
     s.swap_total_mb = m.swap_total_kb / 1024;
     s.swap_used_mb = m.swap_total_kb.saturating_sub(m.swap_free_kb) / 1024;
-    s.uptime_secs = std::fs::read_to_string(proc_root.join("uptime")).map(|x| parse_uptime(&x)).unwrap_or(0);
+    s.uptime_secs = std::fs::read_to_string(proc_root.join("uptime"))
+        .map(|x| parse_uptime(&x))
+        .unwrap_or(0);
     s.rustle_rss_kb = self_rss_kb(proc_root);
     let (t, u) = disk(state_dir);
     s.disk_total_gb = t;
@@ -193,7 +215,11 @@ mod tests {
         assert_eq!(budget_mb(&m, None, None), 992 - 250 - 64);
         assert_eq!(budget_mb(&m, Some(300), None), 992 - 300 - 64);
         assert_eq!(budget_mb(&m, Some(300), Some(900)), 900);
-        assert_eq!(budget_mb(&MemInfo::default(), None, None), 0, "never underflows");
+        assert_eq!(
+            budget_mb(&MemInfo::default(), None, None),
+            0,
+            "never underflows"
+        );
     }
 
     #[test]

@@ -24,7 +24,14 @@ pub fn SiteList() -> impl IntoView {
     }
 }
 
-const TABS: [(&str, &str); 6] = [("overview", "Overview"), ("deploys", "Deploys"), ("env", "Environment"), ("tokens", "Deploy tokens"), ("logs", "Logs"), ("ci", "CI/CD")];
+const TABS: [(&str, &str); 6] = [
+    ("overview", "Overview"),
+    ("deploys", "Deploys"),
+    ("env", "Environment"),
+    ("tokens", "Deploy tokens"),
+    ("logs", "Logs"),
+    ("ci", "CI/CD"),
+];
 
 #[component]
 pub fn SiteDetail(id: String, tab: String) -> impl IntoView {
@@ -35,13 +42,10 @@ pub fn SiteDetail(id: String, tab: String) -> impl IntoView {
         let id = id2.clone();
         async move { api::get::<SiteDto>(&format!("/api/v1/sites/{id}")).await }
     });
-    let id_tabs = id.clone();
-    let tab2 = tab.clone();
     view! {
         <p><a href="#/sites" class="muted">"← All sites"</a></p>
         <Suspense fallback=|| view! { <p class="muted">"Loading…"</p> }>
             {move || {
-                let id = id.clone();
                 let tab = tab.clone();
                 site.get().map(move |r| match r {
                     Err(e) => view! { <p class="err">{e.to_string()}</p> }.into_any(),
@@ -60,13 +64,11 @@ pub fn SiteDetail(id: String, tab: String) -> impl IntoView {
                                 <a class="mono muted" href=format!("https://{}", s.domain) target="_blank" rel="noreferrer">{format!("https://{}", s.domain)}</a>
                             </div>
                             {body}
-                            {let _ = id; ()}
                         }.into_any()
                     }
                 })
             }}
         </Suspense>
-        <div class="tabs bottom-hidden">{let _ = (id_tabs, tab2); ()}</div>
     }
 }
 
@@ -83,7 +85,13 @@ fn Tabs(id: String, active: String) -> impl IntoView {
 }
 
 async fn act(ctx: Ctx, id: String, what: &'static str) {
-    match api::call::<SiteDto>("POST", &format!("/api/v1/sites/{id}/{what}"), serde_json::json!({})).await {
+    match api::call::<SiteDto>(
+        "POST",
+        &format!("/api/v1/sites/{id}/{what}"),
+        serde_json::json!({}),
+    )
+    .await
+    {
         Ok(_) => {
             ctx.ok(&format!("{what} ok"));
             ctx.refresh();
@@ -111,7 +119,8 @@ fn Overview(s: SiteDto) -> impl IntoView {
                 compat_caps: Some(compat.get_untracked()),
                 ..Default::default()
             };
-            match api::call::<SiteDto>("PATCH", &format!("/api/v1/sites/{id}"), js_json(&req)).await {
+            match api::call::<SiteDto>("PATCH", &format!("/api/v1/sites/{id}"), js_json(&req)).await
+            {
                 Ok(_) => {
                     ctx.ok("Saved. Redeploy to apply RAM, port or capability changes.");
                     ctx.refresh();
@@ -243,10 +252,17 @@ fn EnvTab(site: SiteDto) -> impl IntoView {
         move |reveal: bool| {
             let id = id.clone();
             spawn_local(async move {
-                match api::get::<EnvListResp>(&format!("/api/v1/sites/{id}/env?reveal={reveal}")).await {
+                match api::get::<EnvListResp>(&format!("/api/v1/sites/{id}/env?reveal={reveal}"))
+                    .await
+                {
                     Ok(r) => {
                         masked.set(r.masked);
-                        rows.set(r.vars.into_iter().map(|v| (RwSignal::new(v.key), RwSignal::new(v.value))).collect());
+                        rows.set(
+                            r.vars
+                                .into_iter()
+                                .map(|v| (RwSignal::new(v.key), RwSignal::new(v.value)))
+                                .collect(),
+                        );
                     }
                     Err(e) => ctx.err(&e),
                 }
@@ -259,9 +275,23 @@ fn EnvTab(site: SiteDto) -> impl IntoView {
     let id_save = id.clone();
     let save = move |_| {
         let id = id_save.clone();
-        let vars: Vec<EnvVar> = rows.get_untracked().iter().filter(|(k, _)| !k.get_untracked().trim().is_empty()).map(|(k, v)| EnvVar { key: k.get_untracked().trim().to_string(), value: v.get_untracked() }).collect();
+        let vars: Vec<EnvVar> = rows
+            .get_untracked()
+            .iter()
+            .filter(|(k, _)| !k.get_untracked().trim().is_empty())
+            .map(|(k, v)| EnvVar {
+                key: k.get_untracked().trim().to_string(),
+                value: v.get_untracked(),
+            })
+            .collect();
         spawn_local(async move {
-            match api::call_unit("PUT", &format!("/api/v1/sites/{id}/env"), Some(js_json(&PutEnvReq { vars }))).await {
+            match api::call_unit(
+                "PUT",
+                &format!("/api/v1/sites/{id}/env"),
+                Some(js_json(&PutEnvReq { vars })),
+            )
+            .await
+            {
                 Ok(()) => ctx.ok("Saved. Redeploy to apply."),
                 Err(e) => ctx.err(&e),
             }
@@ -317,7 +347,13 @@ fn Tokens(site: SiteDto) -> impl IntoView {
     let create = move |_| {
         let id = id_new.clone();
         spawn_local(async move {
-            match api::call::<TokenCreated>("POST", &format!("/api/v1/sites/{id}/tokens"), serde_json::json!({})).await {
+            match api::call::<TokenCreated>(
+                "POST",
+                &format!("/api/v1/sites/{id}/tokens"),
+                serde_json::json!({}),
+            )
+            .await
+            {
                 Ok(t) => {
                     created.set(Some(t.token));
                     ctx.refresh();
@@ -384,7 +420,8 @@ fn Logs(site: SiteDto) -> impl IntoView {
     let fetch = move || {
         let id = id.clone();
         spawn_local(async move {
-            match api::get::<serde_json::Value>(&format!("/api/v1/sites/{id}/logs?tail=300")).await {
+            match api::get::<serde_json::Value>(&format!("/api/v1/sites/{id}/logs?tail=300")).await
+            {
                 Ok(v) => text.set(v["logs"].as_str().unwrap_or("").to_string()),
                 Err(e) if e.status == 409 => text.set("No running container yet.".into()),
                 Err(e) => ctx.err(&e),
@@ -393,7 +430,15 @@ fn Logs(site: SiteDto) -> impl IntoView {
     };
     fetch.clone()();
     let f2 = fetch.clone();
-    let handle = set_interval_with_handle(move || { if follow.get_untracked() { f2.clone()() } }, Duration::from_secs(3)).ok();
+    let handle = set_interval_with_handle(
+        move || {
+            if follow.get_untracked() {
+                f2.clone()()
+            }
+        },
+        Duration::from_secs(3),
+    )
+    .ok();
     on_cleanup(move || {
         if let Some(h) = handle {
             h.clear();

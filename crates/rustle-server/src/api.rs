@@ -37,17 +37,25 @@ where
     async fn from_request(req: Request, state: &St) -> Result<Self, AppError> {
         match Json::<T>::from_request(req, state).await {
             Ok(Json(v)) => Ok(ApiJson(v)),
-            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => {
-                Err(AppError::new(StatusCode::PAYLOAD_TOO_LARGE, "payload_too_large", "request body is too large (max 64 KB)"))
-            }
-            Err(e) => Err(AppError::bad_request(format!("invalid request body: {}", e.body_text()))),
+            Err(e) if e.status() == StatusCode::PAYLOAD_TOO_LARGE => Err(AppError::new(
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "payload_too_large",
+                "request body is too large (max 64 KB)",
+            )),
+            Err(e) => Err(AppError::bad_request(format!(
+                "invalid request body: {}",
+                e.body_text()
+            ))),
         }
     }
 }
 
 async fn security_headers(mut res: Response) -> Response {
     let h = res.headers_mut();
-    h.insert("x-content-type-options", HeaderValue::from_static("nosniff"));
+    h.insert(
+        "x-content-type-options",
+        HeaderValue::from_static("nosniff"),
+    );
     h.insert("x-frame-options", HeaderValue::from_static("DENY"));
     h.insert("referrer-policy", HeaderValue::from_static("no-referrer"));
     h.insert(
@@ -77,10 +85,22 @@ pub fn router(state: S) -> Router {
         .route("/system/backup/runs", get(backup_runs))
         .route("/system/update", get(get_update).post(apply_update))
         .route("/sites", get(list_sites).post(create_site))
-        .route("/sites/{id}", get(get_site).patch(patch_site).delete(delete_site))
-        .route("/sites/{id}/start", post(|s, a, p| site_action(s, a, p, Action::Start)))
-        .route("/sites/{id}/stop", post(|s, a, p| site_action(s, a, p, Action::Stop)))
-        .route("/sites/{id}/restart", post(|s, a, p| site_action(s, a, p, Action::Restart)))
+        .route(
+            "/sites/{id}",
+            get(get_site).patch(patch_site).delete(delete_site),
+        )
+        .route(
+            "/sites/{id}/start",
+            post(|s, a, p| site_action(s, a, p, Action::Start)),
+        )
+        .route(
+            "/sites/{id}/stop",
+            post(|s, a, p| site_action(s, a, p, Action::Stop)),
+        )
+        .route(
+            "/sites/{id}/restart",
+            post(|s, a, p| site_action(s, a, p, Action::Restart)),
+        )
         .route("/sites/{id}/redeploy", post(redeploy))
         .route("/sites/{id}/logs", get(site_logs))
         .route("/sites/{id}/logs/stream", get(site_logs_stream))
@@ -112,21 +132,35 @@ fn audit(s: &S, action: &str, target: &str) {
 
 // ---- auth -----------------------------------------------------------------------------------
 
-async fn login(State(s): State<S>, headers: HeaderMap, ApiJson(req): ApiJson<LoginReq>) -> AppResult<Response> {
+async fn login(
+    State(s): State<S>,
+    headers: HeaderMap,
+    ApiJson(req): ApiJson<LoginReq>,
+) -> AppResult<Response> {
     let ip = client_ip(&headers);
     let at = now();
     let wait = s.auth.login_wait(&ip, at);
     if wait > 0 {
-        let mut r = AppError::too_many(format!("too many failed attempts; retry in {wait}s")).into_response();
-        r.headers_mut().insert(header::RETRY_AFTER, HeaderValue::from(wait));
+        let mut r = AppError::too_many(format!("too many failed attempts; retry in {wait}s"))
+            .into_response();
+        r.headers_mut()
+            .insert(header::RETRY_AFTER, HeaderValue::from(wait));
         return Ok(r);
     }
-    let (user, hash, tv) = s.store.admin()?.ok_or_else(|| AppError::unavailable("not initialized: run `rustle init` on the server"))?;
+    let (user, hash, tv) = s
+        .store
+        .admin()?
+        .ok_or_else(|| AppError::unavailable("not initialized: run `rustle init` on the server"))?;
     if req.password.len() > 512 || req.username.len() > 128 {
         return Err(AppError::bad_request("credentials too long"));
     }
     // Always run the hash (even for a wrong username) so timing does not reveal the username.
-    let _permit = s.auth.hash_gate.acquire().await.map_err(AppError::internal)?;
+    let _permit = s
+        .auth
+        .hash_gate
+        .acquire()
+        .await
+        .map_err(AppError::internal)?;
     let pw = req.password.clone();
     let ok_pw = tokio::task::spawn_blocking(move || {
         let ok = crypto::verify_password(&pw, &hash);
@@ -145,28 +179,58 @@ async fn login(State(s): State<S>, headers: HeaderMap, ApiJson(req): ApiJson<Log
     s.auth.login_ok(&ip);
     let (token, csrf) = s.auth.issue(tv, at);
     s.store.audit(at, &ip, "login", &user);
-    let mut r = Json(LoginResp { username: user, csrf }).into_response();
-    r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&session_cookie(&token)).map_err(AppError::internal)?);
+    let mut r = Json(LoginResp {
+        username: user,
+        csrf,
+    })
+    .into_response();
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&session_cookie(&token)).map_err(AppError::internal)?,
+    );
     Ok(r)
 }
 
 async fn logout(_a: Admin) -> Response {
     let mut r = StatusCode::NO_CONTENT.into_response();
-    r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&clear_cookie()).expect("static cookie"));
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_cookie()).expect("static cookie"),
+    );
     r
 }
 
 async fn me(State(s): State<S>, a: Admin) -> AppResult<Json<LoginResp>> {
-    let (user, _, _) = s.store.admin()?.ok_or_else(|| AppError::unauthorized("not initialized"))?;
-    Ok(Json(LoginResp { username: user, csrf: a.csrf }))
+    let (user, _, _) = s
+        .store
+        .admin()?
+        .ok_or_else(|| AppError::unauthorized("not initialized"))?;
+    Ok(Json(LoginResp {
+        username: user,
+        csrf: a.csrf,
+    }))
 }
 
-async fn change_password(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<ChangePasswordReq>) -> AppResult<Response> {
+async fn change_password(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(req): ApiJson<ChangePasswordReq>,
+) -> AppResult<Response> {
     if req.new.chars().count() < 12 || req.new.len() > 512 {
-        return Err(AppError::bad_request("the new password must have at least 12 characters"));
+        return Err(AppError::bad_request(
+            "the new password must have at least 12 characters",
+        ));
     }
-    let (_, hash, _) = s.store.admin()?.ok_or_else(|| AppError::unauthorized("not initialized"))?;
-    let _permit = s.auth.hash_gate.acquire().await.map_err(AppError::internal)?;
+    let (_, hash, _) = s
+        .store
+        .admin()?
+        .ok_or_else(|| AppError::unauthorized("not initialized"))?;
+    let _permit = s
+        .auth
+        .hash_gate
+        .acquire()
+        .await
+        .map_err(AppError::internal)?;
     let cur = req.current.clone();
     let cur_ok = tokio::task::spawn_blocking(move || {
         let ok = crypto::verify_password(&cur, &hash);
@@ -190,7 +254,10 @@ async fn change_password(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<Ch
     s.store.set_admin_password(&new_hash)?; // bumps token_version: every session, including this one, is revoked
     audit(&s, "password.change", "admin");
     let mut r = StatusCode::NO_CONTENT.into_response();
-    r.headers_mut().insert(header::SET_COOKIE, HeaderValue::from_str(&clear_cookie()).expect("static cookie"));
+    r.headers_mut().insert(
+        header::SET_COOKIE,
+        HeaderValue::from_str(&clear_cookie()).expect("static cookie"),
+    );
     Ok(r)
 }
 
@@ -199,7 +266,11 @@ async fn change_password(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<Ch
 pub fn collect_stats(s: &AppState) -> SystemStats {
     let mut st = SystemStats::default();
     metrics::fill_system_stats(&mut st, &s.cfg.proc_root, &s.cfg.state_dir);
-    st.cpu_percent = s.sampler.lock().unwrap_or_else(|p| p.into_inner()).cpu_percent(&s.cfg.proc_root);
+    st.cpu_percent = s
+        .sampler
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .cpu_percent(&s.cfg.proc_root);
     let (allocated, budget) = sites::budget(s);
     st.allocated_mb = allocated as u64;
     st.budget_mb = budget as u64;
@@ -231,7 +302,10 @@ async fn stats_stream(State(s): State<S>, _a: Admin) -> impl IntoResponse {
         let _guard = guard;
         loop {
             let st = collect_stats(&_guard.0);
-            let ev = Event::default().event("stats").json_data(&st).unwrap_or_default();
+            let ev = Event::default()
+                .event("stats")
+                .json_data(&st)
+                .unwrap_or_default();
             if tx.send(Ok(ev)).await.is_err() {
                 break;
             }
@@ -243,18 +317,28 @@ async fn stats_stream(State(s): State<S>, _a: Admin) -> impl IntoResponse {
 
 async fn prune(State(s): State<S>, _a: Admin) -> AppResult<Json<PruneResp>> {
     audit(&s, "system.prune", "images");
-    jobs::prune_images(&s).await.map(Json).map_err(|m| AppError::conflict(m))
+    jobs::prune_images(&s)
+        .await
+        .map(Json)
+        .map_err(AppError::conflict)
 }
 
 async fn get_settings(State(s): State<S>, _a: Admin) -> AppResult<Json<SettingsDto>> {
     Ok(Json(SettingsDto {
         admin_domain: sites::admin_domain(&s).unwrap_or_default(),
         acme_email: s.store.setting("acme_email")?.unwrap_or_default(),
-        budget_override_mb: s.store.setting("budget_override_mb")?.and_then(|v| v.parse().ok()),
+        budget_override_mb: s
+            .store
+            .setting("budget_override_mb")?
+            .and_then(|v| v.parse().ok()),
     }))
 }
 
-async fn put_settings(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<SettingsDto>) -> AppResult<Json<SettingsDto>> {
+async fn put_settings(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(req): ApiJson<SettingsDto>,
+) -> AppResult<Json<SettingsDto>> {
     let domain = req.admin_domain.trim().to_ascii_lowercase();
     if !domain.is_empty() {
         if !valid_domain(&domain) {
@@ -265,18 +349,28 @@ async fn put_settings(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<Setti
         }
     }
     let email = req.acme_email.trim().to_string();
-    if !email.is_empty() && (!email.contains('@') || email.len() > 200 || email.contains(char::is_whitespace)) {
+    if !email.is_empty()
+        && (!email.contains('@') || email.len() > 200 || email.contains(char::is_whitespace))
+    {
         return Err(AppError::bad_request("invalid email"));
     }
     s.store.set_setting("admin_domain", &domain)?;
     s.store.set_setting("acme_email", &email)?;
     match req.budget_override_mb {
-        Some(v) if (64..=65536).contains(&v) => s.store.set_setting("budget_override_mb", &v.to_string())?,
+        Some(v) if (64..=65536).contains(&v) => {
+            s.store.set_setting("budget_override_mb", &v.to_string())?
+        }
         Some(_) => return Err(AppError::bad_request("budget_override_mb must be 64-65536")),
         None => s.store.delete_setting("budget_override_mb")?,
     }
-    if let Err(e) = s.gateway.set_admin(&crate::reconcile::base_params(&s)).await {
-        return Err(AppError::unavailable(format!("saved, but the gateway could not be updated yet: {e}")));
+    if let Err(e) = s
+        .gateway
+        .set_admin(&crate::reconcile::base_params(&s))
+        .await
+    {
+        return Err(AppError::unavailable(format!(
+            "saved, but the gateway could not be updated yet: {e}"
+        )));
     }
     audit(&s, "settings.update", &domain);
     get_settings(State(s), _a).await
@@ -286,13 +380,19 @@ async fn get_backup(State(s): State<S>, _a: Admin) -> Json<BackupConfig> {
     Json(backup::get_config(&s))
 }
 
-async fn put_backup(State(s): State<S>, _a: Admin, ApiJson(cfg): ApiJson<BackupConfig>) -> AppResult<Json<BackupConfig>> {
+async fn put_backup(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(cfg): ApiJson<BackupConfig>,
+) -> AppResult<Json<BackupConfig>> {
     backup::set_config(&s, cfg).await?;
     Ok(Json(backup::get_config(&s)))
 }
 
 async fn run_backup(State(s): State<S>, _a: Admin) -> AppResult<Json<serde_json::Value>> {
-    let msg = backup::run(&s).await.map_err(|e| AppError::unprocessable("backup_failed", e))?;
+    let msg = backup::run(&s)
+        .await
+        .map_err(|e| AppError::unprocessable("backup_failed", e))?;
     Ok(Json(serde_json::json!({ "message": msg })))
 }
 
@@ -311,41 +411,80 @@ async fn apply_update(State(s): State<S>, _a: Admin) -> AppResult<Json<serde_jso
         tokio::time::sleep(Duration::from_secs(2)).await;
         std::process::exit(0);
     });
-    Ok(Json(serde_json::json!({ "installed": tag, "restarting": true })))
+    Ok(Json(
+        serde_json::json!({ "installed": tag, "restarting": true }),
+    ))
 }
 
 // ---- sites ----------------------------------------------------------------------------------
 
 async fn list_sites(State(s): State<S>, _a: Admin) -> AppResult<Json<Vec<SiteDto>>> {
-    Ok(Json(s.store.list_sites()?.iter().map(|r| sites::site_dto(&s, r)).collect()))
+    Ok(Json(
+        s.store
+            .list_sites()?
+            .iter()
+            .map(|r| sites::site_dto(&s, r))
+            .collect(),
+    ))
 }
 
 fn load_site(s: &S, id: &str) -> AppResult<crate::store::SiteRow> {
-    s.store.get_site(id)?.ok_or_else(|| AppError::not_found("site not found"))
+    s.store
+        .get_site(id)?
+        .ok_or_else(|| AppError::not_found("site not found"))
 }
 
-async fn create_site(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<CreateSiteReq>) -> AppResult<(StatusCode, Json<SiteDto>)> {
-    Ok((StatusCode::CREATED, Json(sites::create_site(&s, req).await?)))
+async fn create_site(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(req): ApiJson<CreateSiteReq>,
+) -> AppResult<(StatusCode, Json<SiteDto>)> {
+    Ok((
+        StatusCode::CREATED,
+        Json(sites::create_site(&s, req).await?),
+    ))
 }
 
-async fn get_site(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<Json<SiteDto>> {
+async fn get_site(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<Json<SiteDto>> {
     Ok(Json(sites::site_dto(&s, &load_site(&s, &id)?)))
 }
 
-async fn patch_site(State(s): State<S>, _a: Admin, Path(id): Path<String>, ApiJson(req): ApiJson<UpdateSiteReq>) -> AppResult<Json<SiteDto>> {
+async fn patch_site(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateSiteReq>,
+) -> AppResult<Json<SiteDto>> {
     Ok(Json(sites::update_site(&s, &id, req).await?))
 }
 
-async fn delete_site(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<StatusCode> {
+async fn delete_site(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
     sites::delete_site(&s, &id).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn site_action(State(s): State<S>, _a: Admin, Path(id): Path<String>, action: Action) -> AppResult<Json<SiteDto>> {
+async fn site_action(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    action: Action,
+) -> AppResult<Json<SiteDto>> {
     Ok(Json(sites::site_action(&s, &id, action).await?))
 }
 
-async fn redeploy(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
+async fn redeploy(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
     let site = load_site(&s, &id)?;
     Ok((StatusCode::ACCEPTED, Json(deploy::redeploy(&s, &site)?)))
 }
@@ -364,19 +503,43 @@ fn current_container(s: &S, id: &str) -> AppResult<String> {
         .ok_or_else(|| AppError::conflict("site has no running container yet"))
 }
 
-async fn site_logs(State(s): State<S>, _a: Admin, Path(id): Path<String>, Query(q): Query<TailQ>) -> AppResult<Json<serde_json::Value>> {
+async fn site_logs(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    Query(q): Query<TailQ>,
+) -> AppResult<Json<serde_json::Value>> {
     let cid = current_container(&s, &id)?;
-    let logs = s.runtime.logs(&cid, q.tail.unwrap_or(200).min(2000)).await.map_err(|e| AppError::unavailable(e.to_string()))?;
+    let logs = s
+        .runtime
+        .logs(&cid, q.tail.unwrap_or(200).min(2000))
+        .await
+        .map_err(|e| AppError::unavailable(e.to_string()))?;
     Ok(Json(serde_json::json!({ "logs": logs })))
 }
 
-async fn site_logs_stream(State(s): State<S>, _a: Admin, Path(id): Path<String>, Query(q): Query<TailQ>) -> AppResult<impl IntoResponse> {
+async fn site_logs_stream(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    Query(q): Query<TailQ>,
+) -> AppResult<impl IntoResponse> {
     let cid = current_container(&s, &id)?;
-    let mut rx = s.runtime.logs_follow(&cid, q.tail.unwrap_or(100).min(1000)).await.map_err(|e| AppError::unavailable(e.to_string()))?;
+    let mut rx = s
+        .runtime
+        .logs_follow(&cid, q.tail.unwrap_or(100).min(1000))
+        .await
+        .map_err(|e| AppError::unavailable(e.to_string()))?;
     let (tx, out) = tokio::sync::mpsc::channel::<Result<Event, Infallible>>(16);
     tokio::spawn(async move {
         while let Some(chunk) = rx.recv().await {
-            if tx.send(Ok(Event::default().event("log").data(chunk.trim_end_matches('\n')))).await.is_err() {
+            if tx
+                .send(Ok(Event::default()
+                    .event("log")
+                    .data(chunk.trim_end_matches('\n'))))
+                .await
+                .is_err()
+            {
                 break; // browser closed: dropping `rx` ends the Docker log stream
             }
         }
@@ -389,7 +552,12 @@ struct RevealQ {
     reveal: Option<bool>,
 }
 
-async fn get_env(State(s): State<S>, _a: Admin, Path(id): Path<String>, Query(q): Query<RevealQ>) -> AppResult<Json<EnvListResp>> {
+async fn get_env(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    Query(q): Query<RevealQ>,
+) -> AppResult<Json<EnvListResp>> {
     let reveal = q.reveal.unwrap_or(false);
     if reveal {
         audit(&s, "env.reveal", &id);
@@ -397,29 +565,54 @@ async fn get_env(State(s): State<S>, _a: Admin, Path(id): Path<String>, Query(q)
     Ok(Json(sites::get_env(&s, &id, reveal)?))
 }
 
-async fn put_env(State(s): State<S>, _a: Admin, Path(id): Path<String>, ApiJson(req): ApiJson<PutEnvReq>) -> AppResult<StatusCode> {
+async fn put_env(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<PutEnvReq>,
+) -> AppResult<StatusCode> {
     sites::put_env(&s, &id, req.vars)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn list_tokens(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<Json<Vec<TokenDto>>> {
+async fn list_tokens(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<TokenDto>>> {
     Ok(Json(sites::list_tokens(&s, &id)?))
 }
 
-async fn create_token(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<(StatusCode, Json<TokenCreated>)> {
+async fn create_token(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<(StatusCode, Json<TokenCreated>)> {
     Ok((StatusCode::CREATED, Json(sites::create_token(&s, &id)?)))
 }
 
-async fn revoke_token(State(s): State<S>, _a: Admin, Path((id, tid)): Path<(String, String)>) -> AppResult<StatusCode> {
+async fn revoke_token(
+    State(s): State<S>,
+    _a: Admin,
+    Path((id, tid)): Path<(String, String)>,
+) -> AppResult<StatusCode> {
     sites::revoke_token(&s, &id, &tid)?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn workflow(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<Json<WorkflowResp>> {
+async fn workflow(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<Json<WorkflowResp>> {
     Ok(Json(sites::workflow(&s, &id)?))
 }
 
-async fn list_deployments(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<Json<Vec<DeploymentDto>>> {
+async fn list_deployments(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<DeploymentDto>>> {
     load_site(&s, &id)?;
     Ok(Json(
         s.store
@@ -440,44 +633,89 @@ async fn list_deployments(State(s): State<S>, _a: Admin, Path(id): Path<String>)
     ))
 }
 
-async fn rollback(State(s): State<S>, _a: Admin, Path(id): Path<String>, ApiJson(req): ApiJson<RollbackReq>) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
+async fn rollback(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<RollbackReq>,
+) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
     let site = load_site(&s, &id)?;
-    Ok((StatusCode::ACCEPTED, Json(deploy::rollback(&s, &site, &req.deployment_id)?)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(deploy::rollback(&s, &site, &req.deployment_id)?),
+    ))
 }
 
-async fn webhook(State(s): State<S>, headers: HeaderMap, ApiJson(req): ApiJson<DeployWebhookReq>) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
+async fn webhook(
+    State(s): State<S>,
+    headers: HeaderMap,
+    ApiJson(req): ApiJson<DeployWebhookReq>,
+) -> AppResult<(StatusCode, Json<DeployAccepted>)> {
     let token = auth::deploy_token(&s, &headers)?;
     let site = deploy::site_for_webhook(&s, &token.site_id, req.site_name.as_deref())?;
-    Ok((StatusCode::ACCEPTED, Json(deploy::webhook(&s, &site, &req.image)?)))
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(deploy::webhook(&s, &site, &req.image)?),
+    ))
 }
 
 // ---- cron -----------------------------------------------------------------------------------
 
 async fn list_cron(State(s): State<S>, _a: Admin) -> AppResult<Json<Vec<CronJobDto>>> {
-    Ok(Json(s.store.list_cron()?.iter().map(|r| jobs::cron_dto(&s, r)).collect()))
+    Ok(Json(
+        s.store
+            .list_cron()?
+            .iter()
+            .map(|r| jobs::cron_dto(&s, r))
+            .collect(),
+    ))
 }
 
-async fn create_cron(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<CreateCronReq>) -> AppResult<(StatusCode, Json<CronJobDto>)> {
+async fn create_cron(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(req): ApiJson<CreateCronReq>,
+) -> AppResult<(StatusCode, Json<CronJobDto>)> {
     Ok((StatusCode::CREATED, Json(jobs::create_site_job(&s, req)?)))
 }
 
-async fn patch_cron(State(s): State<S>, _a: Admin, Path(id): Path<String>, ApiJson(req): ApiJson<UpdateCronReq>) -> AppResult<Json<CronJobDto>> {
+async fn patch_cron(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+    ApiJson(req): ApiJson<UpdateCronReq>,
+) -> AppResult<Json<CronJobDto>> {
     if let Some(sched) = &req.schedule {
         crate::cron::CronExpr::parse(sched).map_err(|e| AppError::bad_request(e.to_string()))?;
     }
-    let row = s.store.get_cron(&id)?.ok_or_else(|| AppError::not_found("job not found"))?;
+    let row = s
+        .store
+        .get_cron(&id)?
+        .ok_or_else(|| AppError::not_found("job not found"))?;
     if row.kind == "system" && req.schedule.is_some() {
-        return Err(AppError::bad_request("system jobs can only be enabled or disabled"));
+        return Err(AppError::bad_request(
+            "system jobs can only be enabled or disabled",
+        ));
     }
-    s.store.update_cron(&id, req.enabled, req.schedule.as_deref().map(str::trim))?;
-    let row = s.store.get_cron(&id)?.ok_or_else(|| AppError::not_found("job not found"))?;
+    s.store
+        .update_cron(&id, req.enabled, req.schedule.as_deref().map(str::trim))?;
+    let row = s
+        .store
+        .get_cron(&id)?
+        .ok_or_else(|| AppError::not_found("job not found"))?;
     Ok(Json(jobs::cron_dto(&s, &row)))
 }
 
-async fn delete_cron(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<StatusCode> {
+async fn delete_cron(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
     match s.store.get_cron(&id)? {
         None => Err(AppError::not_found("job not found")),
-        Some(r) if r.kind == "system" => Err(AppError::bad_request("system jobs cannot be deleted; disable them instead")),
+        Some(r) if r.kind == "system" => Err(AppError::bad_request(
+            "system jobs cannot be deleted; disable them instead",
+        )),
         Some(_) => {
             s.store.delete_cron(&id)?;
             Ok(StatusCode::NO_CONTENT)
@@ -485,19 +723,35 @@ async fn delete_cron(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> A
     }
 }
 
-async fn cron_runs(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<Json<Vec<CronRunDto>>> {
-    s.store.get_cron(&id)?.ok_or_else(|| AppError::not_found("job not found"))?;
+async fn cron_runs(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<Json<Vec<CronRunDto>>> {
+    s.store
+        .get_cron(&id)?
+        .ok_or_else(|| AppError::not_found("job not found"))?;
     Ok(Json(
         s.store
             .list_runs(&id, 50)?
             .into_iter()
-            .map(|r| CronRunDto { id: r.id, job_id: r.job_id, started_at: r.started_at, finished_at: r.finished_at, exit_code: r.exit_code, log_tail: r.log_tail })
+            .map(|r| CronRunDto {
+                id: r.id,
+                job_id: r.job_id,
+                started_at: r.started_at,
+                finished_at: r.finished_at,
+                exit_code: r.exit_code,
+                log_tail: r.log_tail,
+            })
             .collect(),
     ))
 }
 
 async fn run_cron(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<StatusCode> {
-    let row = s.store.get_cron(&id)?.ok_or_else(|| AppError::not_found("job not found"))?;
+    let row = s
+        .store
+        .get_cron(&id)?
+        .ok_or_else(|| AppError::not_found("job not found"))?;
     if !jobs::run_now(&s, row) {
         return Err(AppError::conflict("job is already running"));
     }
@@ -510,11 +764,19 @@ async fn list_registries(State(s): State<S>, _a: Admin) -> AppResult<Json<Vec<Re
     Ok(Json(sites::list_registries(&s)?))
 }
 
-async fn create_registry(State(s): State<S>, _a: Admin, ApiJson(req): ApiJson<CreateRegistryReq>) -> AppResult<(StatusCode, Json<RegistryDto>)> {
+async fn create_registry(
+    State(s): State<S>,
+    _a: Admin,
+    ApiJson(req): ApiJson<CreateRegistryReq>,
+) -> AppResult<(StatusCode, Json<RegistryDto>)> {
     Ok((StatusCode::CREATED, Json(sites::create_registry(&s, req)?)))
 }
 
-async fn delete_registry(State(s): State<S>, _a: Admin, Path(id): Path<String>) -> AppResult<StatusCode> {
+async fn delete_registry(
+    State(s): State<S>,
+    _a: Admin,
+    Path(id): Path<String>,
+) -> AppResult<StatusCode> {
     sites::delete_registry(&s, &id)?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -541,7 +803,8 @@ mod tests {
 
     impl Reply {
         fn json<T: DeserializeOwned>(&self) -> T {
-            serde_json::from_slice(&self.body).unwrap_or_else(|e| panic!("bad json {e}: {}", String::from_utf8_lossy(&self.body)))
+            serde_json::from_slice(&self.body)
+                .unwrap_or_else(|e| panic!("bad json {e}: {}", String::from_utf8_lossy(&self.body)))
         }
         fn code(&self) -> String {
             self.json::<ApiError>().error.code
@@ -550,10 +813,20 @@ mod tests {
 
     impl Client {
         fn new(e: &TestEnv) -> Client {
-            Client { app: router(e.state.clone()), cookie: None, csrf: None }
+            Client {
+                app: router(e.state.clone()),
+                cookie: None,
+                csrf: None,
+            }
         }
 
-        async fn raw(&self, method: Method, path: &str, body: Option<serde_json::Value>, extra: &[(&str, &str)]) -> Reply {
+        async fn raw(
+            &self,
+            method: Method,
+            path: &str,
+            body: Option<serde_json::Value>,
+            extra: &[(&str, &str)],
+        ) -> Reply {
             let mut b = Request::builder().method(method).uri(path);
             if let Some(c) = &self.cookie {
                 b = b.header("cookie", c);
@@ -562,18 +835,26 @@ mod tests {
                 b = b.header(*k, *v);
             }
             let req = match body {
-                Some(j) => b.header("content-type", "application/json").body(Body::from(j.to_string())).unwrap(),
+                Some(j) => b
+                    .header("content-type", "application/json")
+                    .body(Body::from(j.to_string()))
+                    .unwrap(),
                 None => b.body(Body::empty()).unwrap(),
             };
             let resp = self.app.clone().oneshot(req).await.unwrap();
             let (parts, body) = resp.into_parts();
             let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap().to_vec();
-            Reply { status: parts.status, headers: parts.headers, body: bytes }
+            Reply {
+                status: parts.status,
+                headers: parts.headers,
+                body: bytes,
+            }
         }
 
         async fn req(&self, method: Method, path: &str, body: Option<serde_json::Value>) -> Reply {
             let csrf = self.csrf.clone().unwrap_or_default();
-            self.raw(method, path, body, &[("x-csrf-token", csrf.as_str())]).await
+            self.raw(method, path, body, &[("x-csrf-token", csrf.as_str())])
+                .await
         }
 
         async fn get(&self, p: &str) -> Reply {
@@ -584,9 +865,22 @@ mod tests {
         }
 
         async fn login(&mut self, user: &str, pw: &str) -> Reply {
-            let r = self.raw(Method::POST, "/api/v1/auth/login", Some(serde_json::json!({"username": user, "password": pw})), &[]).await;
+            let r = self
+                .raw(
+                    Method::POST,
+                    "/api/v1/auth/login",
+                    Some(serde_json::json!({"username": user, "password": pw})),
+                    &[],
+                )
+                .await;
             if r.status == 200 {
-                let c = r.headers[header::SET_COOKIE].to_str().unwrap().split(';').next().unwrap().to_string();
+                let c = r.headers[header::SET_COOKIE]
+                    .to_str()
+                    .unwrap()
+                    .split(';')
+                    .next()
+                    .unwrap()
+                    .to_string();
                 self.cookie = Some(c);
                 self.csrf = Some(r.json::<LoginResp>().csrf);
             }
@@ -595,7 +889,10 @@ mod tests {
     }
 
     fn seed_admin(e: &TestEnv) {
-        e.state.store.create_admin("admin", &crypto::hash_password("correct horse battery")).unwrap();
+        e.state
+            .store
+            .create_admin("admin", &crypto::hash_password("correct horse battery"))
+            .unwrap();
     }
 
     async fn logged_in() -> (TestEnv, Client) {
@@ -615,13 +912,23 @@ mod tests {
         let e = TestEnv::new();
         seed_admin(&e);
         let c = Client::new(&e);
-        for (m, p) in [(Method::GET, "/api/v1/sites"), (Method::GET, "/api/v1/system/stats"), (Method::GET, "/api/v1/cron"), (Method::GET, "/api/v1/registries"), (Method::POST, "/api/v1/system/prune"), (Method::GET, "/api/v1/system/backup")] {
+        for (m, p) in [
+            (Method::GET, "/api/v1/sites"),
+            (Method::GET, "/api/v1/system/stats"),
+            (Method::GET, "/api/v1/cron"),
+            (Method::GET, "/api/v1/registries"),
+            (Method::POST, "/api/v1/system/prune"),
+            (Method::GET, "/api/v1/system/backup"),
+        ] {
             let r = c.req(m.clone(), p, None).await;
             assert_eq!(r.status, 401, "{m} {p}");
         }
         assert_eq!(c.raw(Method::GET, "/healthz", None, &[]).await.status, 200);
         assert_eq!(c.raw(Method::GET, "/", None, &[]).await.status, 200);
-        assert_eq!(c.raw(Method::GET, "/api/v1/nope", None, &[]).await.status, 404);
+        assert_eq!(
+            c.raw(Method::GET, "/api/v1/nope", None, &[]).await.status,
+            404
+        );
     }
 
     #[tokio::test]
@@ -637,11 +944,21 @@ mod tests {
         let r = attacker.login("admin", "wrong").await; // 4th failure arms the delay
         assert_eq!(r.status, 401);
         let r = attacker.login("admin", "correct horse battery").await;
-        assert_eq!(r.status, 429, "even the right password is delayed for the abusive IP");
+        assert_eq!(
+            r.status, 429,
+            "even the right password is delayed for the abusive IP"
+        );
         assert!(r.headers.contains_key(header::RETRY_AFTER));
         // the real admin, from another address, is not locked out
         let owner = Client::new(&e);
-        let r = owner.raw(Method::POST, "/api/v1/auth/login", Some(serde_json::json!({"username":"admin","password":"correct horse battery"})), &[("x-forwarded-for", "198.51.100.7")]).await;
+        let r = owner
+            .raw(
+                Method::POST,
+                "/api/v1/auth/login",
+                Some(serde_json::json!({"username":"admin","password":"correct horse battery"})),
+                &[("x-forwarded-for", "198.51.100.7")],
+            )
+            .await;
         assert_eq!(r.status, 200);
     }
 
@@ -658,9 +975,18 @@ mod tests {
     async fn csrf_is_required_for_mutations() {
         let (_e, c) = logged_in().await;
         assert_eq!(c.get("/api/v1/sites").await.status, 200);
-        let no_csrf = c.raw(Method::POST, "/api/v1/sites", Some(site_body("a")), &[]).await;
+        let no_csrf = c
+            .raw(Method::POST, "/api/v1/sites", Some(site_body("a")), &[])
+            .await;
         assert_eq!(no_csrf.status, 403);
-        let wrong = c.raw(Method::POST, "/api/v1/sites", Some(site_body("a")), &[("x-csrf-token", "nope")]).await;
+        let wrong = c
+            .raw(
+                Method::POST,
+                "/api/v1/sites",
+                Some(site_body("a")),
+                &[("x-csrf-token", "nope")],
+            )
+            .await;
         assert_eq!(wrong.status, 403);
         assert_eq!(c.post("/api/v1/sites", site_body("a")).await.status, 201);
     }
@@ -680,23 +1006,42 @@ mod tests {
     #[tokio::test]
     async fn password_change_revokes_sessions() {
         let (e, mut c) = logged_in().await;
-        let r = c.post("/api/v1/auth/password", serde_json::json!({"current":"wrong","new":"a-much-longer-password"})).await;
+        let r = c
+            .post(
+                "/api/v1/auth/password",
+                serde_json::json!({"current":"wrong","new":"a-much-longer-password"}),
+            )
+            .await;
         assert_eq!(r.status, 403);
-        let r = c.post("/api/v1/auth/password", serde_json::json!({"current":"correct horse battery","new":"short"})).await;
+        let r = c
+            .post(
+                "/api/v1/auth/password",
+                serde_json::json!({"current":"correct horse battery","new":"short"}),
+            )
+            .await;
         assert_eq!(r.status, 400);
         let r = c.post("/api/v1/auth/password", serde_json::json!({"current":"correct horse battery","new":"a-much-longer-password"})).await;
         assert_eq!(r.status, 204);
-        assert_eq!(c.get("/api/v1/sites").await.status, 401, "old session is dead");
+        assert_eq!(
+            c.get("/api/v1/sites").await.status,
+            401,
+            "old session is dead"
+        );
         let mut c2 = Client::new(&e);
         assert_eq!(c2.login("admin", "correct horse battery").await.status, 401);
-        assert_eq!(c2.login("admin", "a-much-longer-password").await.status, 200);
+        assert_eq!(
+            c2.login("admin", "a-much-longer-password").await.status,
+            200
+        );
         c.cookie = None;
     }
 
     #[tokio::test]
     async fn bad_json_uses_the_error_format() {
         let (_e, c) = logged_in().await;
-        let r = c.post("/api/v1/sites", serde_json::json!({"name": 5})).await;
+        let r = c
+            .post("/api/v1/sites", serde_json::json!({"name": 5}))
+            .await;
         assert_eq!(r.status, 400);
         assert_eq!(r.code(), "bad_request");
         let huge = serde_json::json!({"name": "a".repeat(100_000)});
@@ -717,21 +1062,49 @@ mod tests {
         assert_eq!(r.status, 200);
         assert!(r.json::<SiteDto>().zero_downtime);
         // env masked by default
-        let r = c.req(Method::PUT, &format!("/api/v1/sites/{}/env", site.id), Some(serde_json::json!({"vars":[{"key":"API_KEY","value":"s3cret"}]}))).await;
+        let r = c
+            .req(
+                Method::PUT,
+                &format!("/api/v1/sites/{}/env", site.id),
+                Some(serde_json::json!({"vars":[{"key":"API_KEY","value":"s3cret"}]})),
+            )
+            .await;
         assert_eq!(r.status, 204);
-        let masked: EnvListResp = c.get(&format!("/api/v1/sites/{}/env", site.id)).await.json();
+        let masked: EnvListResp = c
+            .get(&format!("/api/v1/sites/{}/env", site.id))
+            .await
+            .json();
         assert!(masked.masked && masked.vars[0].value == "********");
-        let shown: EnvListResp = c.get(&format!("/api/v1/sites/{}/env?reveal=true", site.id)).await.json();
+        let shown: EnvListResp = c
+            .get(&format!("/api/v1/sites/{}/env?reveal=true", site.id))
+            .await
+            .json();
         assert_eq!(shown.vars[0].value, "s3cret");
         // workflow
-        let wf: WorkflowResp = c.get(&format!("/api/v1/sites/{}/workflow", site.id)).await.json();
+        let wf: WorkflowResp = c
+            .get(&format!("/api/v1/sites/{}/workflow", site.id))
+            .await
+            .json();
         assert!(wf.workflow_yaml.contains("ghcr.io/o/blog"));
         // deploy via redeploy requires a prior deployment
-        assert_eq!(c.post(&format!("/api/v1/sites/{}/redeploy", site.id), serde_json::json!({})).await.status, 409);
+        assert_eq!(
+            c.post(
+                &format!("/api/v1/sites/{}/redeploy", site.id),
+                serde_json::json!({})
+            )
+            .await
+            .status,
+            409
+        );
         // delete
-        let r = c.req(Method::DELETE, &format!("/api/v1/sites/{}", site.id), None).await;
+        let r = c
+            .req(Method::DELETE, &format!("/api/v1/sites/{}", site.id), None)
+            .await;
         assert_eq!(r.status, 204);
-        assert_eq!(c.get(&format!("/api/v1/sites/{}", site.id)).await.status, 404);
+        assert_eq!(
+            c.get(&format!("/api/v1/sites/{}", site.id)).await.status,
+            404
+        );
         assert!(e.gateway.sites().is_empty());
     }
 
@@ -740,26 +1113,84 @@ mod tests {
         let (e, c) = logged_in().await;
         let a: SiteDto = c.post("/api/v1/sites", site_body("a")).await.json();
         let b: SiteDto = c.post("/api/v1/sites", site_body("b")).await.json();
-        let tok_a: TokenCreated = c.post(&format!("/api/v1/sites/{}/tokens", a.id), serde_json::json!({})).await.json();
+        let tok_a: TokenCreated = c
+            .post(
+                &format!("/api/v1/sites/{}/tokens", a.id),
+                serde_json::json!({}),
+            )
+            .await
+            .json();
         let hook = |tok: &str, body: serde_json::Value| {
             let c = &c;
             let tok = tok.to_string();
-            async move { c.raw(Method::POST, "/api/v1/webhooks/deploy", Some(body), &[("authorization", &format!("Bearer {tok}"))]).await }
+            async move {
+                c.raw(
+                    Method::POST,
+                    "/api/v1/webhooks/deploy",
+                    Some(body),
+                    &[("authorization", &format!("Bearer {tok}"))],
+                )
+                .await
+            }
         };
         // no CSRF needed (machine endpoint) but a valid deploy token is
-        assert_eq!(c.raw(Method::POST, "/api/v1/webhooks/deploy", Some(serde_json::json!({"image":"ghcr.io/o/a:1"})), &[]).await.status, 401);
-        assert_eq!(hook("rt_wrong", serde_json::json!({"image":"ghcr.io/o/a:1"})).await.status, 401);
+        assert_eq!(
+            c.raw(
+                Method::POST,
+                "/api/v1/webhooks/deploy",
+                Some(serde_json::json!({"image":"ghcr.io/o/a:1"})),
+                &[]
+            )
+            .await
+            .status,
+            401
+        );
+        assert_eq!(
+            hook("rt_wrong", serde_json::json!({"image":"ghcr.io/o/a:1"}))
+                .await
+                .status,
+            401
+        );
         // the admin session cookie is not a deploy credential
-        assert_eq!(c.req(Method::POST, "/api/v1/webhooks/deploy", Some(serde_json::json!({"image":"ghcr.io/o/a:1"}))).await.status, 401);
+        assert_eq!(
+            c.req(
+                Method::POST,
+                "/api/v1/webhooks/deploy",
+                Some(serde_json::json!({"image":"ghcr.io/o/a:1"}))
+            )
+            .await
+            .status,
+            401
+        );
         // token of A cannot deploy B's image or name B
-        assert_eq!(hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/b:1"})).await.status, 403);
-        assert_eq!(hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/a:1","site_name":"b"})).await.status, 403);
+        assert_eq!(
+            hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/b:1"}))
+                .await
+                .status,
+            403
+        );
+        assert_eq!(
+            hook(
+                &tok_a.token,
+                serde_json::json!({"image":"ghcr.io/o/a:1","site_name":"b"})
+            )
+            .await
+            .status,
+            403
+        );
         // happy path
-        let r = hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/a:abc123","site_name":"a"})).await;
+        let r = hook(
+            &tok_a.token,
+            serde_json::json!({"image":"ghcr.io/o/a:abc123","site_name":"a"}),
+        )
+        .await;
         assert_eq!(r.status, 202);
         let acc: DeployAccepted = r.json();
         e.state.deployer.wait_idle(&a.id).await;
-        let deps: Vec<DeploymentDto> = c.get(&format!("/api/v1/sites/{}/deployments", a.id)).await.json();
+        let deps: Vec<DeploymentDto> = c
+            .get(&format!("/api/v1/sites/{}/deployments", a.id))
+            .await
+            .json();
         assert_eq!(deps[0].id, acc.deployment_id);
         assert_eq!(deps[0].status, "running");
         assert_eq!(deps[0].trigger, "webhook");
@@ -769,11 +1200,33 @@ mod tests {
         let sb: SiteDto = c.get(&format!("/api/v1/sites/{}", b.id)).await.json();
         assert_eq!(sb.status, "created");
         // revoked token stops working immediately
-        let tokens: Vec<TokenDto> = c.get(&format!("/api/v1/sites/{}/tokens", a.id)).await.json();
-        assert_eq!(c.req(Method::DELETE, &format!("/api/v1/sites/{}/tokens/{}", a.id, tokens[0].id), None).await.status, 204);
-        assert_eq!(hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/a:2"})).await.status, 401);
+        let tokens: Vec<TokenDto> = c
+            .get(&format!("/api/v1/sites/{}/tokens", a.id))
+            .await
+            .json();
+        assert_eq!(
+            c.req(
+                Method::DELETE,
+                &format!("/api/v1/sites/{}/tokens/{}", a.id, tokens[0].id),
+                None
+            )
+            .await
+            .status,
+            204
+        );
+        assert_eq!(
+            hook(&tok_a.token, serde_json::json!({"image":"ghcr.io/o/a:2"}))
+                .await
+                .status,
+            401
+        );
         // rollback endpoint refuses the current deployment
-        let r = c.post(&format!("/api/v1/sites/{}/rollback", a.id), serde_json::json!({"deployment_id": acc.deployment_id})).await;
+        let r = c
+            .post(
+                &format!("/api/v1/sites/{}/rollback", a.id),
+                serde_json::json!({"deployment_id": acc.deployment_id}),
+            )
+            .await;
         assert_eq!(r.status, 409);
     }
 
@@ -781,10 +1234,25 @@ mod tests {
     async fn webhook_is_rate_limited_per_token() {
         let (_e, c) = logged_in().await;
         let a: SiteDto = c.post("/api/v1/sites", site_body("a")).await.json();
-        let tok: TokenCreated = c.post(&format!("/api/v1/sites/{}/tokens", a.id), serde_json::json!({})).await.json();
+        let tok: TokenCreated = c
+            .post(
+                &format!("/api/v1/sites/{}/tokens", a.id),
+                serde_json::json!({}),
+            )
+            .await
+            .json();
         let mut last = 0;
         for _ in 0..35 {
-            last = c.raw(Method::POST, "/api/v1/webhooks/deploy", Some(serde_json::json!({"image":"ghcr.io/o/other:1"})), &[("authorization", &format!("Bearer {}", tok.token))]).await.status.as_u16();
+            last = c
+                .raw(
+                    Method::POST,
+                    "/api/v1/webhooks/deploy",
+                    Some(serde_json::json!({"image":"ghcr.io/o/other:1"})),
+                    &[("authorization", &format!("Bearer {}", tok.token))],
+                )
+                .await
+                .status
+                .as_u16();
         }
         assert_eq!(last, 429);
     }
@@ -796,7 +1264,10 @@ mod tests {
             let r = c.raw(Method::GET, p, None, &[]).await;
             assert_eq!(r.headers["x-content-type-options"], "nosniff", "{p}");
             assert_eq!(r.headers["x-frame-options"], "DENY");
-            assert!(r.headers["content-security-policy"].to_str().unwrap().contains("frame-ancestors 'none'"));
+            assert!(r.headers["content-security-policy"]
+                .to_str()
+                .unwrap()
+                .contains("frame-ancestors 'none'"));
         }
         // API responses are never cached
         let r = c.get("/api/v1/sites").await;
@@ -809,10 +1280,28 @@ mod tests {
         let r = c.req(Method::PUT, "/api/v1/system/settings", Some(serde_json::json!({"admin_domain":"Admin.Example.com","acme_email":"ops@example.com"}))).await;
         assert_eq!(r.status, 200);
         assert_eq!(r.json::<SettingsDto>().admin_domain, "admin.example.com");
-        assert_eq!(e.gateway.base().unwrap().admin_domain.as_deref(), Some("admin.example.com"));
-        assert_eq!(c.req(Method::PUT, "/api/v1/system/settings", Some(serde_json::json!({"admin_domain":"not a domain","acme_email":""}))).await.status, 400);
+        assert_eq!(
+            e.gateway.base().unwrap().admin_domain.as_deref(),
+            Some("admin.example.com")
+        );
+        assert_eq!(
+            c.req(
+                Method::PUT,
+                "/api/v1/system/settings",
+                Some(serde_json::json!({"admin_domain":"not a domain","acme_email":""}))
+            )
+            .await
+            .status,
+            400
+        );
         c.post("/api/v1/sites", site_body("blog")).await;
-        let r = c.req(Method::PUT, "/api/v1/system/settings", Some(serde_json::json!({"admin_domain":"blog.example.com","acme_email":""}))).await;
+        let r = c
+            .req(
+                Method::PUT,
+                "/api/v1/system/settings",
+                Some(serde_json::json!({"admin_domain":"blog.example.com","acme_email":""})),
+            )
+            .await;
         assert_eq!(r.status, 409, "dashboard cannot steal a site's domain");
     }
 
@@ -822,24 +1311,59 @@ mod tests {
         crate::jobs::seed_system_jobs(&e.state.store).unwrap();
         let list: Vec<CronJobDto> = c.get("/api/v1/cron").await.json();
         let sys = list.iter().find(|j| j.kind == "system").unwrap();
-        assert_eq!(c.req(Method::DELETE, &format!("/api/v1/cron/{}", sys.id), None).await.status, 400);
-        assert_eq!(c.req(Method::PATCH, &format!("/api/v1/cron/{}", sys.id), Some(serde_json::json!({"schedule":"* * * * *"}))).await.status, 400);
-        let r = c.req(Method::PATCH, &format!("/api/v1/cron/{}", sys.id), Some(serde_json::json!({"enabled": false}))).await;
+        assert_eq!(
+            c.req(Method::DELETE, &format!("/api/v1/cron/{}", sys.id), None)
+                .await
+                .status,
+            400
+        );
+        assert_eq!(
+            c.req(
+                Method::PATCH,
+                &format!("/api/v1/cron/{}", sys.id),
+                Some(serde_json::json!({"schedule":"* * * * *"}))
+            )
+            .await
+            .status,
+            400
+        );
+        let r = c
+            .req(
+                Method::PATCH,
+                &format!("/api/v1/cron/{}", sys.id),
+                Some(serde_json::json!({"enabled": false})),
+            )
+            .await;
         assert!(!r.json::<CronJobDto>().enabled);
         let site: SiteDto = c.post("/api/v1/sites", site_body("a")).await.json();
-        let r = c.post("/api/v1/cron", serde_json::json!({"name":"x","schedule":"bad","site_id":site.id,"argv":["a"]})).await;
+        let r = c
+            .post(
+                "/api/v1/cron",
+                serde_json::json!({"name":"x","schedule":"bad","site_id":site.id,"argv":["a"]}),
+            )
+            .await;
         assert_eq!(r.status, 400);
         let r = c.post("/api/v1/cron", serde_json::json!({"name":"x","schedule":"*/5 * * * *","site_id":site.id,"argv":["node","j.js"]})).await;
         assert_eq!(r.status, 201);
         let job: CronJobDto = r.json();
-        assert_eq!(c.req(Method::DELETE, &format!("/api/v1/cron/{}", job.id), None).await.status, 204);
+        assert_eq!(
+            c.req(Method::DELETE, &format!("/api/v1/cron/{}", job.id), None)
+                .await
+                .status,
+            204
+        );
         assert_eq!(c.get("/api/v1/cron/nope/runs").await.status, 404);
     }
 
     #[tokio::test]
     async fn registries_never_return_secrets() {
         let (_e, c) = logged_in().await;
-        let r = c.post("/api/v1/registries", serde_json::json!({"name":"gh","username":"me","secret":"ghp_topsecret_value"})).await;
+        let r = c
+            .post(
+                "/api/v1/registries",
+                serde_json::json!({"name":"gh","username":"me","secret":"ghp_topsecret_value"}),
+            )
+            .await;
         assert_eq!(r.status, 201);
         assert!(!String::from_utf8_lossy(&r.body).contains("topsecret"));
         let list = c.get("/api/v1/registries").await;
@@ -862,14 +1386,26 @@ mod tests {
     async fn stats_stream_emits_and_releases_its_subscription() {
         use http_body_util::BodyExt;
         let (e, c) = logged_in().await;
-        let req = Request::builder().method(Method::GET).uri("/api/v1/system/stream").header("cookie", c.cookie.clone().unwrap()).body(Body::empty()).unwrap();
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri("/api/v1/system/stream")
+            .header("cookie", c.cookie.clone().unwrap())
+            .body(Body::empty())
+            .unwrap();
         let resp = c.app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
         let mut body = resp.into_body();
-        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame()).await.unwrap().unwrap().unwrap();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
         let text = String::from_utf8_lossy(frame.data_ref().unwrap()).to_string();
-        assert!(text.contains("event: stats") && text.contains("mem_total_mb"), "{text}");
+        assert!(
+            text.contains("event: stats") && text.contains("mem_total_mb"),
+            "{text}"
+        );
         assert_eq!(e.state.stats_subscribers.load(Ordering::SeqCst), 1);
         drop(body); // the dashboard closed: sampling must stop
         for _ in 0..300 {
@@ -878,6 +1414,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert_eq!(e.state.stats_subscribers.load(Ordering::SeqCst), 0, "no sampling without a viewer");
+        assert_eq!(
+            e.state.stats_subscribers.load(Ordering::SeqCst),
+            0,
+            "no sampling without a viewer"
+        );
     }
 }

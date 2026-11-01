@@ -44,7 +44,10 @@ pub struct FakeHealth {
 
 impl FakeHealth {
     pub fn new(default: bool) -> Self {
-        Self { script: Mutex::new(vec![]), default: AtomicBool::new(default) }
+        Self {
+            script: Mutex::new(vec![]),
+            default: AtomicBool::new(default),
+        }
     }
     pub fn script(&self, v: Vec<bool>) {
         let mut s = self.script.lock().unwrap();
@@ -87,14 +90,22 @@ pub struct FakeResolver {
 
 impl FakeResolver {
     pub fn set(&self, host: &str, ips: &[&str]) {
-        self.map.lock().unwrap().insert(host.into(), ips.iter().map(|s| s.parse().unwrap()).collect());
+        self.map.lock().unwrap().insert(
+            host.into(),
+            ips.iter().map(|s| s.parse().unwrap()).collect(),
+        );
     }
 }
 
 #[async_trait]
 impl Resolver for FakeResolver {
     async fn resolve(&self, host: &str) -> Vec<IpAddr> {
-        self.map.lock().unwrap().get(host).cloned().unwrap_or_default()
+        self.map
+            .lock()
+            .unwrap()
+            .get(host)
+            .cloned()
+            .unwrap_or_default()
     }
 }
 
@@ -146,7 +157,16 @@ impl AppState {
         gateway: Arc<dyn Gateway>,
         github: Arc<dyn Github>,
     ) -> Arc<AppState> {
-        Self::with_backends(cfg, store, key, runtime, gateway, Arc::new(HttpHealth), Arc::new(SystemResolver), github)
+        Self::with_backends(
+            cfg,
+            store,
+            key,
+            runtime,
+            gateway,
+            Arc::new(HttpHealth),
+            Arc::new(SystemResolver),
+            github,
+        )
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -186,7 +206,10 @@ impl AppState {
     }
 
     pub fn degraded(&self) -> Option<String> {
-        self.degraded.lock().unwrap_or_else(|p| p.into_inner()).clone()
+        self.degraded
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
     }
 }
 
@@ -203,6 +226,7 @@ pub struct TestEnv {
 }
 
 #[cfg(test)]
+#[allow(clippy::new_without_default)]
 impl TestEnv {
     pub fn new() -> TestEnv {
         Self::build(false)
@@ -222,7 +246,11 @@ impl TestEnv {
         let auth = AuthState::new(&key);
         let state = Arc::new(AppState {
             cfg,
-            store: if file_db { Store::open(&cfg_db).unwrap() } else { Store::open_memory().unwrap() },
+            store: if file_db {
+                Store::open(&cfg_db).unwrap()
+            } else {
+                Store::open_memory().unwrap()
+            },
             key,
             runtime: runtime.clone(),
             gateway: gateway.clone(),
@@ -251,6 +279,14 @@ impl TestEnv {
             "MemTotal: 1015808 kB\nMemFree: 300000 kB\nMemAvailable: 700000 kB\nSwapTotal: 1572860 kB\nSwapFree: 1572860 kB\n",
         )
         .unwrap();
-        TestEnv { state, runtime, gateway, health, resolver, github, dir }
+        TestEnv {
+            state,
+            runtime,
+            gateway,
+            health,
+            resolver,
+            github,
+            dir,
+        }
     }
 }

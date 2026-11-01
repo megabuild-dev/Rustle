@@ -28,10 +28,18 @@ pub fn set_csrf(v: String) {
 }
 
 fn net(e: impl std::fmt::Display) -> ApiErr {
-    ApiErr { status: 0, code: "network".into(), message: format!("network error: {e}") }
+    ApiErr {
+        status: 0,
+        code: "network".into(),
+        message: format!("network error: {e}"),
+    }
 }
 
-async fn send(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<Response, ApiErr> {
+async fn send(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<Response, ApiErr> {
     let b = match method {
         "POST" => Request::post(path),
         "PUT" => Request::put(path),
@@ -55,19 +63,39 @@ async fn send(method: &str, path: &str, body: Option<serde_json::Value>) -> Resu
         Ok(e) => (e.error.code, e.error.message),
         Err(_) => ("http".to_string(), format!("request failed ({status})")),
     };
-    Err(ApiErr { status, code, message })
+    Err(ApiErr {
+        status,
+        code,
+        message,
+    })
 }
 
 pub async fn get<T: DeserializeOwned>(path: &str) -> Result<T, ApiErr> {
-    send("GET", path, None).await?.json::<T>().await.map_err(net)
+    send("GET", path, None)
+        .await?
+        .json::<T>()
+        .await
+        .map_err(net)
 }
 
-pub async fn call<T: DeserializeOwned>(method: &str, path: &str, body: serde_json::Value) -> Result<T, ApiErr> {
-    send(method, path, Some(body)).await?.json::<T>().await.map_err(net)
+pub async fn call<T: DeserializeOwned>(
+    method: &str,
+    path: &str,
+    body: serde_json::Value,
+) -> Result<T, ApiErr> {
+    send(method, path, Some(body))
+        .await?
+        .json::<T>()
+        .await
+        .map_err(net)
 }
 
 /// For endpoints that answer 204/empty.
-pub async fn call_unit(method: &str, path: &str, body: Option<serde_json::Value>) -> Result<(), ApiErr> {
+pub async fn call_unit(
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> Result<(), ApiErr> {
     send(method, path, body).await.map(|_| ())
 }
 

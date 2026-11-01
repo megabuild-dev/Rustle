@@ -52,7 +52,9 @@ impl MasterKey {
 
     pub fn from_hex(s: &str) -> Result<Self, CryptoError> {
         let v = hex::decode(s.trim()).map_err(|_| CryptoError::BadKeyFile)?;
-        Ok(MasterKey(v.try_into().map_err(|_| CryptoError::BadKeyFile)?))
+        Ok(MasterKey(
+            v.try_into().map_err(|_| CryptoError::BadKeyFile)?,
+        ))
     }
 
     /// Load the key file, or create it (mode 0600) when it does not exist and `create` is set.
@@ -75,7 +77,8 @@ impl MasterKey {
     pub fn derive(&self, label: &str) -> [u8; 32] {
         let hk = Hkdf::<Sha256>::new(Some(b"rustle-v1"), &self.0);
         let mut out = [0u8; 32];
-        hk.expand(label.as_bytes(), &mut out).expect("32 bytes is a valid HKDF length");
+        hk.expand(label.as_bytes(), &mut out)
+            .expect("32 bytes is a valid HKDF length");
         out
     }
 
@@ -100,7 +103,9 @@ impl MasterKey {
         let key = self.derive("data");
         let cipher = Aes256Gcm::new_from_slice(&key).expect("key length");
         let (nonce, ct) = blob.split_at(12);
-        cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad }).map_err(|_| CryptoError::Decrypt)
+        cipher
+            .decrypt(Nonce::from_slice(nonce), Payload { msg: ct, aad })
+            .map_err(|_| CryptoError::Decrypt)
     }
 
     pub fn seal_str(&self, s: &str, aad: &str) -> Vec<u8> {
@@ -123,7 +128,11 @@ impl MasterKey {
 fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
-    let mut f = std::fs::OpenOptions::new().write(true).create_new(true).mode(0o600).open(path)?;
+    let mut f = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(path)?;
     f.write_all(data)
 }
 
@@ -189,7 +198,10 @@ pub fn hash_password(pw: &str) -> String {
     let mut salt_bytes = [0u8; 16];
     rand::rng().fill_bytes(&mut salt_bytes);
     let salt = SaltString::encode_b64(&salt_bytes).expect("salt encoding");
-    argon().hash_password(pw.as_bytes(), &salt).expect("argon2 hashing").to_string()
+    argon()
+        .hash_password(pw.as_bytes(), &salt)
+        .expect("argon2 hashing")
+        .to_string()
 }
 
 pub fn verify_password(pw: &str, hash: &str) -> bool {
@@ -201,7 +213,9 @@ pub fn verify_password(pw: &str, hash: &str) -> bool {
 
 /// Verify an ed25519 signature (used for signed self-updates).
 pub fn ed25519_verify(pubkey: &[u8; 32], msg: &[u8], sig: &[u8]) -> bool {
-    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pubkey).verify(msg, sig).is_ok()
+    ring::signature::UnparsedPublicKey::new(&ring::signature::ED25519, pubkey)
+        .verify(msg, sig)
+        .is_ok()
 }
 
 #[cfg(test)]
@@ -212,7 +226,10 @@ mod tests {
     fn seal_open_roundtrip_and_tamper() {
         let k = MasterKey::generate();
         let blob = k.seal_str("postgres://secret", "site1:DATABASE_URL");
-        assert_eq!(k.open_str(&blob, "site1:DATABASE_URL").unwrap(), "postgres://secret");
+        assert_eq!(
+            k.open_str(&blob, "site1:DATABASE_URL").unwrap(),
+            "postgres://secret"
+        );
         // wrong aad
         assert!(k.open_str(&blob, "site2:DATABASE_URL").is_err());
         // tampered
@@ -221,7 +238,9 @@ mod tests {
         bad[last] ^= 1;
         assert!(k.open_str(&bad, "site1:DATABASE_URL").is_err());
         // other key
-        assert!(MasterKey::generate().open_str(&blob, "site1:DATABASE_URL").is_err());
+        assert!(MasterKey::generate()
+            .open_str(&blob, "site1:DATABASE_URL")
+            .is_err());
         // short
         assert!(k.open(&[1, 2, 3], b"").is_err());
     }
@@ -280,6 +299,9 @@ mod tests {
         assert!(ct_eq(b"abc", b"abc"));
         assert!(!ct_eq(b"abc", b"abd"));
         assert!(!ct_eq(b"abc", b"ab"));
-        assert_eq!(sha256_hex(b""), "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
+        assert_eq!(
+            sha256_hex(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
     }
 }

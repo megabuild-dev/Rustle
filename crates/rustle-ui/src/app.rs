@@ -28,7 +28,9 @@ pub fn parse_route(hash: &str) -> Route {
 }
 
 fn current_route() -> Route {
-    let hash = web_sys::window().and_then(|w| w.location().hash().ok()).unwrap_or_default();
+    let hash = web_sys::window()
+        .and_then(|w| w.location().hash().ok())
+        .unwrap_or_default();
     parse_route(&hash)
 }
 
@@ -64,14 +66,18 @@ fn Login() -> impl IntoView {
         ev.prevent_default();
         busy.set(true);
         spawn_local(async move {
-            let body = api::js_json(&LoginReq { username: user.get_untracked(), password: pass.get_untracked() });
+            let body = api::js_json(&LoginReq {
+                username: user.get_untracked(),
+                password: pass.get_untracked(),
+            });
             match api::call::<LoginResp>("POST", "/api/v1/auth/login", body).await {
                 Ok(me) => {
                     api::set_csrf(me.csrf);
                     pass.set(String::new());
+                    ctx.toast.set(None);
                     ctx.user.set(Some(me.username));
                 }
-                Err(e) => ctx.err(&e),
+                Err(e) => ctx.say(false, &e.message), // a 401 here means bad credentials, not an expired session
             }
             busy.set(false);
         });
@@ -152,8 +158,14 @@ mod tests {
         assert_eq!(parse_route(""), Route::Overview);
         assert_eq!(parse_route("#/"), Route::Overview);
         assert_eq!(parse_route("#/sites"), Route::Sites);
-        assert_eq!(parse_route("#/sites/ab12"), Route::Site("ab12".into(), "overview".into()));
-        assert_eq!(parse_route("#/sites/ab12/env"), Route::Site("ab12".into(), "env".into()));
+        assert_eq!(
+            parse_route("#/sites/ab12"),
+            Route::Site("ab12".into(), "overview".into())
+        );
+        assert_eq!(
+            parse_route("#/sites/ab12/env"),
+            Route::Site("ab12".into(), "env".into())
+        );
         assert_eq!(parse_route("#/cron"), Route::Cron);
         assert_eq!(parse_route("#/settings"), Route::Settings);
         assert_eq!(parse_route("#/unknown/path"), Route::Overview);

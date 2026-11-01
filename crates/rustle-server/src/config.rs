@@ -15,7 +15,10 @@ impl Endpoint {
         } else if let Some(p) = s.strip_prefix("unix:") {
             Endpoint::Unix(PathBuf::from(p))
         } else {
-            let s = s.strip_prefix("tcp://").or_else(|| s.strip_prefix("http://")).unwrap_or(s);
+            let s = s
+                .strip_prefix("tcp://")
+                .or_else(|| s.strip_prefix("http://"))
+                .unwrap_or(s);
             Endpoint::Tcp(s.trim_end_matches('/').to_string())
         }
     }
@@ -48,7 +51,8 @@ pub struct Config {
 impl Config {
     pub fn from_env() -> Config {
         let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
-        let state_dir = PathBuf::from(get("RUSTLE_STATE_DIR").unwrap_or_else(|| "/var/lib/rustle".into()));
+        let state_dir =
+            PathBuf::from(get("RUSTLE_STATE_DIR").unwrap_or_else(|| "/var/lib/rustle".into()));
         let unix_socket = match get("RUSTLE_SOCKET") {
             Some(s) if s == "none" => None,
             Some(s) => Some(PathBuf::from(s)),
@@ -66,20 +70,28 @@ impl Config {
         Config {
             local_bind,
             unix_socket,
-            db_path: get("RUSTLE_DB").map(PathBuf::from).unwrap_or_else(|| state_dir.join("rustle.db")),
+            db_path: get("RUSTLE_DB")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| state_dir.join("rustle.db")),
             master_key_file: get("RUSTLE_MASTER_KEY_FILE")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| PathBuf::from("/etc/rustle/master.key")),
-            docker: Endpoint::parse(&get("DOCKER_HOST").unwrap_or_else(|| "tcp://127.0.0.1:2375".into())),
+            docker: Endpoint::parse(
+                &get("DOCKER_HOST").unwrap_or_else(|| "tcp://127.0.0.1:2375".into()),
+            ),
             caddy_admin: Endpoint::parse(
-                &get("CADDY_ADMIN_URL").unwrap_or_else(|| "unix:///run/rustle/caddy-admin.sock".into()),
+                &get("CADDY_ADMIN_URL")
+                    .unwrap_or_else(|| "unix:///run/rustle/caddy-admin.sock".into()),
             ),
             admin_upstream,
             public_ip: get("RUSTLE_PUBLIC_IP"),
             network: get("RUSTLE_NETWORK").unwrap_or_else(|| "rustle-net".into()),
-            cgroup_root: PathBuf::from(get("RUSTLE_CGROUP_ROOT").unwrap_or_else(|| "/sys/fs/cgroup".into())),
+            cgroup_root: PathBuf::from(
+                get("RUSTLE_CGROUP_ROOT").unwrap_or_else(|| "/sys/fs/cgroup".into()),
+            ),
             github_api: get("RUSTLE_GITHUB_API").unwrap_or_else(|| "https://api.github.com".into()),
-            release_repo: get("RUSTLE_RELEASE_REPO").unwrap_or_else(|| "megalabs-dev/rustle".into()),
+            release_repo: get("RUSTLE_RELEASE_REPO")
+                .unwrap_or_else(|| "megalabs-dev/rustle".into()),
             update_pubkey: option_env!("RUSTLE_UPDATE_PUBKEY_HEX").and_then(|h| {
                 let v = hex::decode(h).ok()?;
                 v.try_into().ok()
@@ -121,8 +133,14 @@ mod tests {
 
     #[test]
     fn endpoint_parse() {
-        assert!(matches!(Endpoint::parse("unix:///run/x.sock"), Endpoint::Unix(p) if p.to_str() == Some("/run/x.sock")));
-        assert!(matches!(Endpoint::parse("tcp://127.0.0.1:2375"), Endpoint::Tcp(s) if s == "127.0.0.1:2375"));
-        assert!(matches!(Endpoint::parse("http://localhost:2019/"), Endpoint::Tcp(s) if s == "localhost:2019"));
+        assert!(
+            matches!(Endpoint::parse("unix:///run/x.sock"), Endpoint::Unix(p) if p.to_str() == Some("/run/x.sock"))
+        );
+        assert!(
+            matches!(Endpoint::parse("tcp://127.0.0.1:2375"), Endpoint::Tcp(s) if s == "127.0.0.1:2375")
+        );
+        assert!(
+            matches!(Endpoint::parse("http://localhost:2019/"), Endpoint::Tcp(s) if s == "localhost:2019")
+        );
     }
 }

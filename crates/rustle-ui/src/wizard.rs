@@ -20,7 +20,11 @@ pub fn Wizard() -> impl IntoView {
     let busy = RwSignal::new(false);
     let error = RwSignal::new(None::<String>);
     let result = RwSignal::new(None::<(SiteDto, String, WorkflowResp)>);
-    let registries = LocalResource::new(move || async move { api::get::<Vec<RegistryDto>>("/api/v1/registries").await.unwrap_or_default() });
+    let registries = LocalResource::new(move || async move {
+        api::get::<Vec<RegistryDto>>("/api/v1/registries")
+            .await
+            .unwrap_or_default()
+    });
 
     let close = move || {
         ctx.wizard.set(false);
@@ -29,14 +33,26 @@ pub fn Wizard() -> impl IntoView {
 
     let valid1 = move || {
         let n = name.get();
-        !n.is_empty() && !domain.get().trim().is_empty() && repo.get().trim().starts_with("ghcr.io/") && n.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
+        !n.is_empty()
+            && !domain.get().trim().is_empty()
+            && repo.get().trim().starts_with("ghcr.io/")
+            && n.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
     };
 
     let create = move |_| {
         busy.set(true);
         error.set(None);
         spawn_local(async move {
-            let env_vars: Vec<EnvVar> = env.get_untracked().iter().filter(|(k, _)| !k.get_untracked().trim().is_empty()).map(|(k, v)| EnvVar { key: k.get_untracked().trim().to_string(), value: v.get_untracked() }).collect();
+            let env_vars: Vec<EnvVar> = env
+                .get_untracked()
+                .iter()
+                .filter(|(k, _)| !k.get_untracked().trim().is_empty())
+                .map(|(k, v)| EnvVar {
+                    key: k.get_untracked().trim().to_string(),
+                    value: v.get_untracked(),
+                })
+                .collect();
             let req = CreateSiteReq {
                 name: name.get_untracked(),
                 domain: domain.get_untracked().trim().to_string(),
@@ -50,13 +66,25 @@ pub fn Wizard() -> impl IntoView {
             };
             match api::call::<SiteDto>("POST", "/api/v1/sites", js_json(&req)).await {
                 Err(e) => error.set(Some(match e.code.as_str() {
-                    "dns_missing" | "dns_mismatch" => format!("{} Tick “Skip DNS check” to continue anyway.", e.message),
-                    "budget_exceeded" => format!("{} Tick “Allow exceeding the RAM budget” to continue anyway.", e.message),
+                    "dns_missing" | "dns_mismatch" => {
+                        format!("{} Tick “Skip DNS check” to continue anyway.", e.message)
+                    }
+                    "budget_exceeded" => format!(
+                        "{} Tick “Allow exceeding the RAM budget” to continue anyway.",
+                        e.message
+                    ),
                     _ => e.message,
                 })),
                 Ok(site) => {
-                    let tok = api::call::<TokenCreated>("POST", &format!("/api/v1/sites/{}/tokens", site.id), serde_json::json!({})).await;
-                    let wf = api::get::<WorkflowResp>(&format!("/api/v1/sites/{}/workflow", site.id)).await;
+                    let tok = api::call::<TokenCreated>(
+                        "POST",
+                        &format!("/api/v1/sites/{}/tokens", site.id),
+                        serde_json::json!({}),
+                    )
+                    .await;
+                    let wf =
+                        api::get::<WorkflowResp>(&format!("/api/v1/sites/{}/workflow", site.id))
+                            .await;
                     match (tok, wf) {
                         (Ok(t), Ok(w)) => {
                             result.set(Some((site, t.token, w)));

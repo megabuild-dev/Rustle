@@ -61,7 +61,11 @@ pub fn site_route(name: &str, domain: &str, dial: &str) -> Value {
 /// Full base configuration. Used at install time (printed by `rustle caddy-config`) and to repair
 /// a gateway that lost its `main` server.
 pub fn base_config(p: &BaseParams) -> Value {
-    let listen = if p.admin_listen.is_empty() { ADMIN_LISTEN_DEFAULT } else { &p.admin_listen };
+    let listen = if p.admin_listen.is_empty() {
+        ADMIN_LISTEN_DEFAULT
+    } else {
+        &p.admin_listen
+    };
     let mut server = json!({
         "listen": [":443", ":80"],
         "routes": [admin_route(p)],
@@ -109,14 +113,20 @@ impl HttpGateway {
     }
 
     async fn call(&self, req: Req) -> GwResult<httpc::Resp> {
-        httpc::send(&self.target, &req, Duration::from_secs(10)).await.map_err(|e| GwError::Unavailable(e.to_string()))
+        httpc::send(&self.target, &req, Duration::from_secs(10))
+            .await
+            .map_err(|e| GwError::Unavailable(e.to_string()))
     }
 
     fn check(r: &httpc::Resp) -> GwResult<()> {
         if r.ok() {
             Ok(())
         } else {
-            Err(GwError::Rejected(format!("{}: {}", r.status, r.text().chars().take(300).collect::<String>())))
+            Err(GwError::Rejected(format!(
+                "{}: {}",
+                r.status,
+                r.text().chars().take(300).collect::<String>()
+            )))
         }
     }
 
@@ -142,7 +152,9 @@ impl Gateway for HttpGateway {
     }
 
     async fn ensure_base(&self, p: &BaseParams) -> GwResult<()> {
-        let r = self.call(Req::get("/config/apps/http/servers/main")).await?;
+        let r = self
+            .call(Req::get("/config/apps/http/servers/main"))
+            .await?;
         let have_server = r.ok() && r.text().trim() != "null";
         if !have_server {
             tracing::warn!("caddy has no main server; loading base config");
@@ -158,7 +170,9 @@ impl Gateway for HttpGateway {
     }
 
     async fn set_admin(&self, p: &BaseParams) -> GwResult<()> {
-        let r = self.call(Req::new(hyper::Method::PATCH, "/id/admin").json(&admin_route(p))).await?;
+        let r = self
+            .call(Req::new(hyper::Method::PATCH, "/id/admin").json(&admin_route(p)))
+            .await?;
         Self::check(&r)
     }
 
@@ -166,24 +180,32 @@ impl Gateway for HttpGateway {
         let route = site_route(name, domain, dial);
         let id = format!("site-{name}");
         let r = if self.exists(&id).await? {
-            self.call(Req::new(hyper::Method::PATCH, format!("/id/{id}")).json(&route)).await?
+            self.call(Req::new(hyper::Method::PATCH, format!("/id/{id}")).json(&route))
+                .await?
         } else {
             // PUT on an array index inserts, putting the route before the catch-all admin route.
-            self.call(Req::new(hyper::Method::PUT, format!("{ROUTES}/0")).json(&route)).await?
+            self.call(Req::new(hyper::Method::PUT, format!("{ROUTES}/0")).json(&route))
+                .await?
         };
         Self::check(&r)
     }
 
     async fn set_upstream(&self, name: &str, dial: &str) -> GwResult<()> {
         let r = self
-            .call(Req::new(hyper::Method::PATCH, format!("/id/up-{name}/upstreams")).json(&json!([{ "dial": dial }])))
+            .call(
+                Req::new(hyper::Method::PATCH, format!("/id/up-{name}/upstreams"))
+                    .json(&json!([{ "dial": dial }])),
+            )
             .await?;
         Self::check(&r)
     }
 
     async fn remove_site(&self, name: &str) -> GwResult<()> {
-        let r = self.call(Req::new(hyper::Method::DELETE, format!("/id/site-{name}"))).await?;
-        if r.ok() || r.status == 404 || (r.status == 500 && r.text().contains("unknown object ID")) {
+        let r = self
+            .call(Req::new(hyper::Method::DELETE, format!("/id/site-{name}")))
+            .await?;
+        if r.ok() || r.status == 404 || (r.status == 500 && r.text().contains("unknown object ID"))
+        {
             Ok(())
         } else {
             Self::check(&r)
@@ -321,25 +343,45 @@ mod tests {
         let routes = &c["apps"]["http"]["servers"]["main"]["routes"];
         assert_eq!(routes[0]["@id"], "admin");
         assert_eq!(routes[0]["match"][0]["host"][0], "admin.example.com");
-        assert_eq!(routes[0]["handle"][0]["upstreams"][0]["dial"], "unix//run/rustle/rustle.sock");
-        assert!(c["apps"]["http"]["servers"]["main"].get("tls_connection_policies").is_none());
-        assert_eq!(c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["email"], "ops@example.com");
+        assert_eq!(
+            routes[0]["handle"][0]["upstreams"][0]["dial"],
+            "unix//run/rustle/rustle.sock"
+        );
+        assert!(c["apps"]["http"]["servers"]["main"]
+            .get("tls_connection_policies")
+            .is_none());
+        assert_eq!(
+            c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["email"],
+            "ops@example.com"
+        );
     }
 
     #[test]
     fn base_config_ip_mode_uses_internal_ca_and_matches_everything() {
         let c = base_config(&params(None));
         let routes = &c["apps"]["http"]["servers"]["main"]["routes"];
-        assert!(routes[0].get("match").is_none(), "catch-all so the IP serves the dashboard");
-        assert_eq!(c["apps"]["http"]["servers"]["main"]["tls_connection_policies"][0]["default_sni"], "203.0.113.9");
-        assert_eq!(c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"], "internal");
+        assert!(
+            routes[0].get("match").is_none(),
+            "catch-all so the IP serves the dashboard"
+        );
+        assert_eq!(
+            c["apps"]["http"]["servers"]["main"]["tls_connection_policies"][0]["default_sni"],
+            "203.0.113.9"
+        );
+        assert_eq!(
+            c["apps"]["tls"]["automation"]["policies"][0]["issuers"][0]["module"],
+            "internal"
+        );
     }
 
     #[test]
     fn admin_listens_on_a_unix_socket_not_tcp() {
         let c = base_config(&params(None));
         let l = c["admin"]["listen"].as_str().unwrap();
-        assert!(l.starts_with("unix/"), "admin API must never listen on TCP inside rustle-net: {l}");
+        assert!(
+            l.starts_with("unix/"),
+            "admin API must never listen on TCP inside rustle-net: {l}"
+        );
     }
 
     #[tokio::test]
@@ -353,7 +395,9 @@ mod tests {
         })
         .await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
-        gw.upsert_site("blog", "blog.example.com", "rustle-blog-abc:3000").await.unwrap();
+        gw.upsert_site("blog", "blog.example.com", "rustle-blog-abc:3000")
+            .await
+            .unwrap();
         let reqs = m.requests();
         let put = reqs.iter().find(|r| r.method == "PUT").unwrap();
         assert_eq!(put.path, "/config/apps/http/servers/main/routes/0");
@@ -361,34 +405,60 @@ mod tests {
         assert_eq!(body["@id"], "site-blog");
         assert_eq!(body["match"][0]["host"][0], "blog.example.com");
         assert_eq!(body["handle"][0]["@id"], "up-blog");
-        assert_eq!(body["handle"][0]["upstreams"][0]["dial"], "rustle-blog-abc:3000");
+        assert_eq!(
+            body["handle"][0]["upstreams"][0]["dial"],
+            "rustle-blog-abc:3000"
+        );
     }
 
     #[tokio::test]
     async fn upsert_existing_uses_patch_by_id() {
         let m = MockHttp::start(|_| (200, vec![], "{}".into())).await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
-        gw.upsert_site("blog", "blog.example.com", "x:1").await.unwrap();
-        assert!(m.requests().iter().any(|r| r.method == "PATCH" && r.path == "/id/site-blog"));
+        gw.upsert_site("blog", "blog.example.com", "x:1")
+            .await
+            .unwrap();
+        assert!(m
+            .requests()
+            .iter()
+            .any(|r| r.method == "PATCH" && r.path == "/id/site-blog"));
     }
 
     #[tokio::test]
     async fn set_upstream_targets_handler_id() {
         let m = MockHttp::start(|_| (200, vec![], "{}".into())).await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
-        gw.set_upstream("blog", "rustle-blog-new:3000").await.unwrap();
+        gw.set_upstream("blog", "rustle-blog-new:3000")
+            .await
+            .unwrap();
         let r = &m.requests()[0];
-        assert_eq!((r.method.as_str(), r.path.as_str()), ("PATCH", "/id/up-blog/upstreams"));
+        assert_eq!(
+            (r.method.as_str(), r.path.as_str()),
+            ("PATCH", "/id/up-blog/upstreams")
+        );
         assert_eq!(r.json()[0]["dial"], "rustle-blog-new:3000");
-        assert_eq!(r.header("content-type").as_deref(), Some("application/json"));
+        assert_eq!(
+            r.header("content-type").as_deref(),
+            Some("application/json")
+        );
     }
 
     #[tokio::test]
     async fn remove_is_idempotent_and_errors_surface() {
-        let m = MockHttp::start(|r| if r.path.contains("gone") { (404, vec![], "{}".into()) } else { (500, vec![], "{\"error\":\"boom\"}".into()) }).await;
+        let m = MockHttp::start(|r| {
+            if r.path.contains("gone") {
+                (404, vec![], "{}".into())
+            } else {
+                (500, vec![], "{\"error\":\"boom\"}".into())
+            }
+        })
+        .await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
         gw.remove_site("gone").await.unwrap();
-        assert!(matches!(gw.remove_site("other").await, Err(GwError::Rejected(_))));
+        assert!(matches!(
+            gw.remove_site("other").await,
+            Err(GwError::Rejected(_))
+        ));
         let down = HttpGateway::new(Target::Tcp("127.0.0.1:1".into()));
         assert!(matches!(down.ping().await, Err(GwError::Unavailable(_))));
     }
@@ -402,25 +472,47 @@ mod tests {
         .await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
         gw.ensure_base(&params(None)).await.unwrap();
-        assert!(m.requests().iter().any(|r| r.method == "POST" && r.path == "/load"));
+        assert!(m
+            .requests()
+            .iter()
+            .any(|r| r.method == "POST" && r.path == "/load"));
 
         let m2 = MockHttp::start(|r| match (r.method.as_str(), r.path.as_str()) {
-            ("GET", "/config/apps/http/servers/main") => (200, vec![], "{\"listen\":[\":443\"]}".into()),
+            ("GET", "/config/apps/http/servers/main") => {
+                (200, vec![], "{\"listen\":[\":443\"]}".into())
+            }
             ("GET", "/id/admin") => (404, vec![], "{}".into()),
             _ => (200, vec![], "{}".into()),
         })
         .await;
         let gw = HttpGateway::new(Target::Tcp(m2.addr.clone()));
         gw.ensure_base(&params(None)).await.unwrap();
-        let post = m2.requests().into_iter().find(|r| r.method == "POST").unwrap();
-        assert_eq!(post.path, "/config/apps/http/servers/main/routes", "POST appends => admin stays last");
+        let post = m2
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "POST")
+            .unwrap();
+        assert_eq!(
+            post.path, "/config/apps/http/servers/main/routes",
+            "POST appends => admin stays last"
+        );
     }
 
     #[tokio::test]
     async fn site_ids_lists_only_site_routes() {
-        let m = MockHttp::start(|_| (200, vec![], json!([{"@id":"site-a"},{"@id":"admin"},{"match":[]},{"@id":"site-b"}]).to_string())).await;
+        let m = MockHttp::start(|_| {
+            (
+                200,
+                vec![],
+                json!([{"@id":"site-a"},{"@id":"admin"},{"match":[]},{"@id":"site-b"}]).to_string(),
+            )
+        })
+        .await;
         let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
-        assert_eq!(gw.site_ids().await.unwrap(), vec!["site-a".to_string(), "site-b".to_string()]);
+        assert_eq!(
+            gw.site_ids().await.unwrap(),
+            vec!["site-a".to_string(), "site-b".to_string()]
+        );
     }
 
     #[tokio::test]

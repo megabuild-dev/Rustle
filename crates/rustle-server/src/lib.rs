@@ -17,10 +17,10 @@ pub mod imageref;
 pub mod jobs;
 pub mod metrics;
 pub mod reconcile;
+pub mod server;
+pub mod sites;
+pub mod store;
 #[doc(hidden)]
 pub mod testutil;
-pub mod sites;
-pub mod server;
-pub mod store;
 pub mod update;
 pub mod util;

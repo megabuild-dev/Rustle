@@ -49,7 +49,10 @@ pub fn cron_dto(state: &AppState, r: &CronRow) -> CronJobDto {
         name: r.name.clone(),
         schedule: r.schedule.clone(),
         site_id: r.site_id.clone(),
-        argv: r.argv_json.as_deref().and_then(|j| serde_json::from_str(j).ok()),
+        argv: r
+            .argv_json
+            .as_deref()
+            .and_then(|j| serde_json::from_str(j).ok()),
         enabled: r.enabled,
         system_key: r.system_key.clone(),
         last_status: last.as_ref().map(|l| match (l.finished_at, l.exit_code) {
@@ -65,8 +68,13 @@ pub fn validate_argv(argv: &[String]) -> AppResult<()> {
     if argv.is_empty() || argv.len() > 32 {
         return Err(AppError::bad_request("argv must contain 1-32 items"));
     }
-    if argv.iter().any(|a| a.is_empty() || a.len() > 1024 || a.contains('\0')) {
-        return Err(AppError::bad_request("argv items must be 1-1024 chars without NUL"));
+    if argv
+        .iter()
+        .any(|a| a.is_empty() || a.len() > 1024 || a.contains('\0'))
+    {
+        return Err(AppError::bad_request(
+            "argv items must be 1-1024 chars without NUL",
+        ));
     }
     Ok(())
 }
@@ -77,7 +85,10 @@ pub fn create_site_job(state: &AppState, req: CreateCronReq) -> AppResult<CronJo
     }
     CronExpr::parse(&req.schedule).map_err(|e| AppError::bad_request(e.to_string()))?;
     validate_argv(&req.argv)?;
-    state.store.get_site(&req.site_id)?.ok_or_else(|| AppError::bad_request("unknown site_id"))?;
+    state
+        .store
+        .get_site(&req.site_id)?
+        .ok_or_else(|| AppError::bad_request("unknown site_id"))?;
     let row = CronRow {
         id: rand_hex(6),
         kind: "site".into(),
@@ -102,7 +113,9 @@ pub fn tick(state: &Arc<AppState>, at: i64) -> Vec<String> {
     }
     let minute = at.div_euclid(60);
     let mut fired = vec![];
-    let Ok(jobs) = state.store.list_cron() else { return fired };
+    let Ok(jobs) = state.store.list_cron() else {
+        return fired;
+    };
     for job in jobs.into_iter().filter(|j| j.enabled) {
         if job.last_fired_minute == Some(minute) {
             continue;
@@ -115,7 +128,12 @@ pub fn tick(state: &Arc<AppState>, at: i64) -> Vec<String> {
             continue;
         }
         let _ = state.store.set_last_fired(&job.id, minute);
-        if !state.running_jobs.lock().unwrap_or_else(|p| p.into_inner()).insert(job.id.clone()) {
+        if !state
+            .running_jobs
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(job.id.clone())
+        {
             tracing::warn!(job = %job.name, "previous run still active; skipping this minute");
             continue;
         }
@@ -137,14 +155,25 @@ pub async fn run_job(state: Arc<AppState>, job: CronRow) {
         },
         _ => run_site_job(&state, &job).await,
     };
-    let _ = state.store.finish_run(run_id, now(), exit, &tail(&log, MAX_LOG));
+    let _ = state
+        .store
+        .finish_run(run_id, now(), exit, &tail(&log, MAX_LOG));
     let _ = state.store.trim_runs(&job.id, 50);
-    state.running_jobs.lock().unwrap_or_else(|p| p.into_inner()).remove(&job.id);
+    state
+        .running_jobs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&job.id);
 }
 
 /// Manual trigger. Returns false when the job is already running.
 pub fn run_now(state: &Arc<AppState>, job: CronRow) -> bool {
-    if !state.running_jobs.lock().unwrap_or_else(|p| p.into_inner()).insert(job.id.clone()) {
+    if !state
+        .running_jobs
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(job.id.clone())
+    {
         return false;
     }
     let st = state.clone();
@@ -165,7 +194,12 @@ fn tail(s: &str, max: usize) -> String {
 
 pub async fn run_system(state: &Arc<AppState>, key: &str) -> Result<String, String> {
     match key {
-        "prune_images" => prune_images(state).await.map(|r| format!("removed {} images, reclaimed {} bytes", r.images_deleted, r.reclaimed_bytes)),
+        "prune_images" => prune_images(state).await.map(|r| {
+            format!(
+                "removed {} images, reclaimed {} bytes",
+                r.images_deleted, r.reclaimed_bytes
+            )
+        }),
         "housekeeping" => housekeeping(state),
         "backup" => crate::backup::run(state).await,
         "update_check" => {
@@ -175,7 +209,11 @@ pub async fn run_system(state: &Arc<AppState>, key: &str) -> Result<String, Stri
             }
             Ok(match info.reason {
                 Some(r) => format!("update check: {r}"),
-                None => format!("current {} latest {}", info.current, info.latest.unwrap_or_default()),
+                None => format!(
+                    "current {} latest {}",
+                    info.current,
+                    info.latest.unwrap_or_default()
+                ),
             })
         }
         other => Err(format!("unknown system job '{other}'")),
@@ -184,7 +222,10 @@ pub async fn run_system(state: &Arc<AppState>, key: &str) -> Result<String, Stri
 
 fn housekeeping(state: &AppState) -> Result<String, String> {
     let t = now();
-    state.store.trim_audit(t - 90 * 86_400).map_err(|e| e.message)?;
+    state
+        .store
+        .trim_audit(t - 90 * 86_400)
+        .map_err(|e| e.message)?;
     state.store.trim_backup_runs(30).map_err(|e| e.message)?;
     for j in state.store.list_cron().map_err(|e| e.message)? {
         state.store.trim_runs(&j.id, 50).map_err(|e| e.message)?;
@@ -198,12 +239,28 @@ pub async fn prune_images(state: &AppState) -> Result<PruneResp, String> {
     if state.deployer.any_busy() {
         return Err("skipped: a deployment is in progress".into());
     }
-    let protected: HashSet<String> = state.store.protected_digests(3).map_err(|e| e.message)?.into_iter().collect();
-    let in_use: HashSet<String> =
-        state.runtime.list_containers(None).await.map_err(|e| e.to_string())?.into_iter().map(|c| c.image_id).collect();
+    let protected: HashSet<String> = state
+        .store
+        .protected_digests(3)
+        .map_err(|e| e.message)?
+        .into_iter()
+        .collect();
+    let in_use: HashSet<String> = state
+        .runtime
+        .list_containers(None)
+        .await
+        .map_err(|e| e.to_string())?
+        .into_iter()
+        .map(|c| c.image_id)
+        .collect();
     let mut deleted = 0;
     let mut bytes = 0u64;
-    for img in state.runtime.list_images().await.map_err(|e| e.to_string())? {
+    for img in state
+        .runtime
+        .list_images()
+        .await
+        .map_err(|e| e.to_string())?
+    {
         if in_use.contains(&img.id) || img.repo_digests.iter().any(|d| protected.contains(d)) {
             continue;
         }
@@ -215,19 +272,34 @@ pub async fn prune_images(state: &AppState) -> Result<PruneResp, String> {
             Err(e) => tracing::warn!("could not remove image {}: {e}", img.id),
         }
     }
-    Ok(PruneResp { reclaimed_bytes: bytes, images_deleted: deleted })
+    Ok(PruneResp {
+        reclaimed_bytes: bytes,
+        images_deleted: deleted,
+    })
 }
 
 async fn run_site_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) {
     let fail = |m: &str| (Some(-1), m.to_string());
-    let Some(site) = job.site_id.as_deref().and_then(|s| state.store.get_site(s).ok().flatten()) else {
+    let Some(site) = job
+        .site_id
+        .as_deref()
+        .and_then(|s| state.store.get_site(s).ok().flatten())
+    else {
         return fail("site no longer exists");
     };
-    let Some(dep) = site.current_deployment_id.as_deref().and_then(|d| state.store.get_deployment(d).ok().flatten()) else {
+    let Some(dep) = site
+        .current_deployment_id
+        .as_deref()
+        .and_then(|d| state.store.get_deployment(d).ok().flatten())
+    else {
         return fail("skipped: site has no deployment");
     };
     let image = dep.image_digest.clone().unwrap_or(dep.image_ref.clone());
-    let Some(argv) = job.argv_json.as_deref().and_then(|j| serde_json::from_str::<Vec<String>>(j).ok()) else {
+    let Some(argv) = job
+        .argv_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+    else {
         return fail("job has no valid argv");
     };
     if validate_argv(&argv).is_err() {
@@ -264,13 +336,25 @@ async fn run_site_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) 
     };
     // No AutoRemove: wait, then read the logs, then remove (AutoRemove races the log read).
     let result = async {
-        rt.start(&id).await.map_err(|e| format!("start failed: {e}"))?;
-        let mut code = rt.wait(&id, state.tuning.oneshot_timeout).await.map_err(|e| e.to_string())?;
+        rt.start(&id)
+            .await
+            .map_err(|e| format!("start failed: {e}"))?;
+        let mut code = rt
+            .wait(&id, state.tuning.oneshot_timeout)
+            .await
+            .map_err(|e| e.to_string())?;
         let mut note = String::new();
         if code.is_none() {
             let _ = rt.kill(&id).await;
-            code = rt.wait(&id, std::time::Duration::from_secs(10)).await.ok().flatten();
-            note = format!("\n[rustle] killed after {}s timeout\n", state.tuning.oneshot_timeout.as_secs());
+            code = rt
+                .wait(&id, std::time::Duration::from_secs(10))
+                .await
+                .ok()
+                .flatten();
+            note = format!(
+                "\n[rustle] killed after {}s timeout\n",
+                state.tuning.oneshot_timeout.as_secs()
+            );
             code = Some(code.unwrap_or(137));
         }
         let logs = rt.logs(&id, 500).await.unwrap_or_else(|e| match e {
@@ -305,7 +389,10 @@ mod tests {
                 ram_limit_mb: 128,
                 container_port: 3000,
                 registry_id: None,
-                env: vec![EnvVar { key: "K".into(), value: "v".into() }],
+                env: vec![EnvVar {
+                    key: "K".into(),
+                    value: "v".into(),
+                }],
                 skip_dns_check: true,
                 override_budget: true,
             },
@@ -363,7 +450,10 @@ mod tests {
         assert_eq!(fired.len(), 1);
         let prune = s.store.get_system_cron("prune_images").unwrap().unwrap();
         assert_eq!(fired[0], prune.id);
-        assert!(tick(s, at + 30).is_empty(), "same minute does not fire twice");
+        assert!(
+            tick(s, at + 30).is_empty(),
+            "same minute does not fire twice"
+        );
         assert!(tick(s, at + 61).is_empty(), "next minute: nothing due");
         for _ in 0..200 {
             if s.running_jobs.lock().unwrap().is_empty() {
@@ -386,7 +476,10 @@ mod tests {
         seed_system_jobs(&s.store).unwrap();
         let prune = s.store.get_system_cron("prune_images").unwrap().unwrap();
         s.running_jobs.lock().unwrap().insert(prune.id.clone());
-        assert!(tick(s, 1_793_498_400).is_empty(), "still running => skipped");
+        assert!(
+            tick(s, 1_793_498_400).is_empty(),
+            "still running => skipped"
+        );
     }
 
     #[tokio::test]
@@ -399,9 +492,21 @@ mod tests {
         assert_eq!(code, Some(0));
         assert!(log.contains("migrated 3 rows"));
         let calls = e.runtime.calls();
-        assert!(calls.iter().any(|c| c.starts_with("create rustle-cron-blog-")));
-        assert!(calls.last().unwrap().starts_with("remove rustle-cron-blog-"), "container is always removed: {calls:?}");
-        assert_eq!(e.runtime.containers().len(), 1, "only the app container remains");
+        assert!(calls
+            .iter()
+            .any(|c| c.starts_with("create rustle-cron-blog-")));
+        assert!(
+            calls
+                .last()
+                .unwrap()
+                .starts_with("remove rustle-cron-blog-"),
+            "container is always removed: {calls:?}"
+        );
+        assert_eq!(
+            e.runtime.containers().len(),
+            1,
+            "only the app container remains"
+        );
         // the one-shot got the argv as Cmd, no restart policy, same RAM limit
         e.runtime.set_oneshot(3, "boom", false);
         let (code, log) = run_site_job(&e.state, &job(&site.id, &["false"])).await;
@@ -417,7 +522,11 @@ mod tests {
         let (code, log) = run_site_job(&e.state, &job(&site.id, &["sleep", "9999"])).await;
         assert_eq!(code, Some(137));
         assert!(log.contains("killed after"));
-        assert!(e.runtime.calls().iter().any(|c| c.starts_with("kill rustle-cron-")));
+        assert!(e
+            .runtime
+            .calls()
+            .iter()
+            .any(|c| c.starts_with("kill rustle-cron-")));
         assert_eq!(e.runtime.containers().len(), 1);
     }
 
@@ -425,7 +534,11 @@ mod tests {
     async fn job_skipped_when_ram_is_short_or_site_undeployed() {
         let e = TestEnv::new();
         let site = deployed_site(&e).await;
-        std::fs::write(e.state.cfg.proc_root.join("meminfo"), "MemTotal: 1015808 kB\nMemAvailable: 100000 kB\n").unwrap();
+        std::fs::write(
+            e.state.cfg.proc_root.join("meminfo"),
+            "MemTotal: 1015808 kB\nMemAvailable: 100000 kB\n",
+        )
+        .unwrap();
         let (code, log) = run_site_job(&e.state, &job(&site.id, &["x"])).await;
         assert_eq!(code, Some(-1));
         assert!(log.starts_with("skipped"));
@@ -437,9 +550,15 @@ mod tests {
     async fn prune_keeps_in_use_and_recent_digests() {
         let e = TestEnv::new();
         let site = deployed_site(&e).await; // one running deployment with a recorded digest
-        let dep = e.state.store.get_deployment(site.current_deployment_id.as_deref().unwrap()).unwrap().unwrap();
+        let dep = e
+            .state
+            .store
+            .get_deployment(site.current_deployment_id.as_deref().unwrap())
+            .unwrap()
+            .unwrap();
         let protected_digest = dep.image_digest.unwrap();
-        e.runtime.add_image("sha256:orphan", &["ghcr.io/o/old@sha256:aaa"]);
+        e.runtime
+            .add_image("sha256:orphan", &["ghcr.io/o/old@sha256:aaa"]);
         e.runtime.add_image("sha256:inuse", &[]);
         e.runtime.add_foreign_container("caddy", &[]);
         // make the foreign container reference the "in use" image id
@@ -449,8 +568,14 @@ mod tests {
         assert!(before.contains(&"sha256:orphan".to_string()));
         let r = prune_images(&e.state).await.unwrap();
         let after = e.runtime.image_ids();
-        assert!(!after.contains(&"sha256:orphan".to_string()), "unreferenced image removed");
-        assert!(after.iter().any(|i| i.starts_with("sha256:img")), "deployed image survives: {after:?}");
+        assert!(
+            !after.contains(&"sha256:orphan".to_string()),
+            "unreferenced image removed"
+        );
+        assert!(
+            after.iter().any(|i| i.starts_with("sha256:img")),
+            "deployed image survives: {after:?}"
+        );
         assert!(r.images_deleted >= 1);
     }
 
@@ -468,12 +593,38 @@ mod tests {
     async fn create_site_job_validates() {
         let e = TestEnv::new();
         let site = deployed_site(&e).await;
-        let ok = CreateCronReq { name: "cleanup".into(), schedule: "0 * * * *".into(), site_id: site.id.clone(), argv: vec!["node".into(), "c.js".into()] };
+        let ok = CreateCronReq {
+            name: "cleanup".into(),
+            schedule: "0 * * * *".into(),
+            site_id: site.id.clone(),
+            argv: vec!["node".into(), "c.js".into()],
+        };
         let dto = create_site_job(&e.state, ok.clone()).unwrap();
         assert_eq!(dto.kind, "site");
-        assert!(create_site_job(&e.state, CreateCronReq { schedule: "nope".into(), ..ok.clone() }).is_err());
-        assert!(create_site_job(&e.state, CreateCronReq { argv: vec![], ..ok.clone() }).is_err());
-        assert!(create_site_job(&e.state, CreateCronReq { site_id: "zzz".into(), ..ok }).is_err());
+        assert!(create_site_job(
+            &e.state,
+            CreateCronReq {
+                schedule: "nope".into(),
+                ..ok.clone()
+            }
+        )
+        .is_err());
+        assert!(create_site_job(
+            &e.state,
+            CreateCronReq {
+                argv: vec![],
+                ..ok.clone()
+            }
+        )
+        .is_err());
+        assert!(create_site_job(
+            &e.state,
+            CreateCronReq {
+                site_id: "zzz".into(),
+                ..ok
+            }
+        )
+        .is_err());
     }
 
     #[test]

@@ -19,14 +19,22 @@ pub fn SettingsPage() -> impl IntoView {
 #[component]
 fn Account() -> impl IntoView {
     let ctx = expect_context::<Ctx>();
-    let (cur, new1, new2) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (cur, new1, new2) = (
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+    );
     let save = move |_| {
         if new1.get_untracked() != new2.get_untracked() {
-            ctx.toast.set(Some((false, "The new passwords do not match".into())));
+            ctx.toast
+                .set(Some((false, "The new passwords do not match".into())));
             return;
         }
         spawn_local(async move {
-            let body = js_json(&ChangePasswordReq { current: cur.get_untracked(), new: new1.get_untracked() });
+            let body = js_json(&ChangePasswordReq {
+                current: cur.get_untracked(),
+                new: new1.get_untracked(),
+            });
             match api::call_unit("POST", "/api/v1/auth/password", Some(body)).await {
                 Ok(()) => {
                     ctx.user.set(None); // every session was revoked
@@ -51,17 +59,29 @@ fn Account() -> impl IntoView {
 #[component]
 fn Dashboard() -> impl IntoView {
     let ctx = expect_context::<Ctx>();
-    let (domain, email, budget) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (domain, email, budget) = (
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+    );
     spawn_local(async move {
         if let Ok(s) = api::get::<SettingsDto>("/api/v1/system/settings").await {
             domain.set(s.admin_domain);
             email.set(s.acme_email);
-            budget.set(s.budget_override_mb.map(|b| b.to_string()).unwrap_or_default());
+            budget.set(
+                s.budget_override_mb
+                    .map(|b| b.to_string())
+                    .unwrap_or_default(),
+            );
         }
     });
     let save = move |_| {
         spawn_local(async move {
-            let req = SettingsDto { admin_domain: domain.get_untracked(), acme_email: email.get_untracked(), budget_override_mb: budget.get_untracked().trim().parse().ok() };
+            let req = SettingsDto {
+                admin_domain: domain.get_untracked(),
+                acme_email: email.get_untracked(),
+                budget_override_mb: budget.get_untracked().trim().parse().ok(),
+            };
             match api::call::<SettingsDto>("PUT", "/api/v1/system/settings", js_json(&req)).await {
                 Ok(_) => ctx.ok("Saved. A certificate is requested for the new domain; point its A record at this server first."),
                 Err(e) => ctx.err(&e),
@@ -88,12 +108,24 @@ fn Registries() -> impl IntoView {
     let ctx = expect_context::<Ctx>();
     let list = LocalResource::new(move || {
         ctx.tick.get();
-        async move { api::get::<Vec<RegistryDto>>("/api/v1/registries").await.unwrap_or_default() }
+        async move {
+            api::get::<Vec<RegistryDto>>("/api/v1/registries")
+                .await
+                .unwrap_or_default()
+        }
     });
-    let (name, user, secret) = (RwSignal::new(String::new()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (name, user, secret) = (
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+    );
     let add = move |_| {
         spawn_local(async move {
-            let req = CreateRegistryReq { name: name.get_untracked(), username: user.get_untracked(), secret: secret.get_untracked() };
+            let req = CreateRegistryReq {
+                name: name.get_untracked(),
+                username: user.get_untracked(),
+                secret: secret.get_untracked(),
+            };
             match api::call::<RegistryDto>("POST", "/api/v1/registries", js_json(&req)).await {
                 Ok(_) => {
                     secret.set(String::new());
@@ -128,11 +160,21 @@ fn Registries() -> impl IntoView {
 #[component]
 fn Backup() -> impl IntoView {
     let ctx = expect_context::<Ctx>();
-    let (enabled, repo, branch, prefix, token) = (RwSignal::new(false), RwSignal::new(String::new()), RwSignal::new("main".to_string()), RwSignal::new("rustle-backups".to_string()), RwSignal::new(String::new()));
+    let (enabled, repo, branch, prefix, token) = (
+        RwSignal::new(false),
+        RwSignal::new(String::new()),
+        RwSignal::new("main".to_string()),
+        RwSignal::new("rustle-backups".to_string()),
+        RwSignal::new(String::new()),
+    );
     let token_set = RwSignal::new(false);
     let runs = LocalResource::new(move || {
         ctx.tick.get();
-        async move { api::get::<Vec<BackupRunDto>>("/api/v1/system/backup/runs").await.unwrap_or_default() }
+        async move {
+            api::get::<Vec<BackupRunDto>>("/api/v1/system/backup/runs")
+                .await
+                .unwrap_or_default()
+        }
     });
     spawn_local(async move {
         if let Ok(c) = api::get::<BackupConfig>("/api/v1/system/backup").await {
@@ -145,7 +187,14 @@ fn Backup() -> impl IntoView {
     });
     let save = move |_| {
         spawn_local(async move {
-            let req = BackupConfig { enabled: enabled.get_untracked(), repo: repo.get_untracked(), branch: branch.get_untracked(), path_prefix: prefix.get_untracked(), token: Some(token.get_untracked()).filter(|t| !t.is_empty()), token_set: false };
+            let req = BackupConfig {
+                enabled: enabled.get_untracked(),
+                repo: repo.get_untracked(),
+                branch: branch.get_untracked(),
+                path_prefix: prefix.get_untracked(),
+                token: Some(token.get_untracked()).filter(|t| !t.is_empty()),
+                token_set: false,
+            };
             match api::call::<BackupConfig>("PUT", "/api/v1/system/backup", js_json(&req)).await {
                 Ok(c) => {
                     token.set(String::new());
@@ -158,8 +207,17 @@ fn Backup() -> impl IntoView {
     };
     let run = move |_| {
         spawn_local(async move {
-            match api::call::<serde_json::Value>("POST", "/api/v1/system/backup/run", serde_json::json!({})).await {
-                Ok(v) => { ctx.ok(v["message"].as_str().unwrap_or("Backup done")); ctx.refresh(); }
+            match api::call::<serde_json::Value>(
+                "POST",
+                "/api/v1/system/backup/run",
+                serde_json::json!({}),
+            )
+            .await
+            {
+                Ok(v) => {
+                    ctx.ok(v["message"].as_str().unwrap_or("Backup done"));
+                    ctx.refresh();
+                }
                 Err(e) => ctx.err(&e),
             }
         });

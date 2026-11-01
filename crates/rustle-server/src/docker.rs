@@ -52,7 +52,14 @@ pub struct ContainerSpec {
     pub long_running: bool,
 }
 
-pub const COMPAT_CAPS: [&str; 6] = ["CHOWN", "SETUID", "SETGID", "DAC_OVERRIDE", "FOWNER", "NET_BIND_SERVICE"];
+pub const COMPAT_CAPS: [&str; 6] = [
+    "CHOWN",
+    "SETUID",
+    "SETGID",
+    "DAC_OVERRIDE",
+    "FOWNER",
+    "NET_BIND_SERVICE",
+];
 
 /// Build the JSON body for `POST /containers/create`.
 pub fn create_body(spec: &ContainerSpec) -> Value {
@@ -151,7 +158,9 @@ impl HttpRuntime {
     }
 
     async fn call(&self, req: Req, timeout: Duration) -> RtResult<httpc::Resp> {
-        httpc::send(&self.target, &req, timeout).await.map_err(|e| RtError::Unavailable(e.to_string()))
+        httpc::send(&self.target, &req, timeout)
+            .await
+            .map_err(|e| RtError::Unavailable(e.to_string()))
     }
 
     fn map_err(resp: &httpc::Resp) -> RtError {
@@ -202,7 +211,9 @@ pub fn demux_logs(data: &[u8]) -> String {
 #[async_trait]
 impl Runtime for HttpRuntime {
     async fn ping(&self) -> RtResult<()> {
-        let r = self.call(Req::get("/_ping"), Duration::from_secs(3)).await?;
+        let r = self
+            .call(Req::get("/_ping"), Duration::from_secs(3))
+            .await?;
         if r.ok() {
             Ok(())
         } else {
@@ -211,10 +222,16 @@ impl Runtime for HttpRuntime {
     }
 
     async fn pull(&self, image: &str, auth: Option<&RegistryAuth>) -> RtResult<()> {
-        let r = crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
-        let mut req = Req::post(format!("/images/create?fromImage={}&tag={}", q(&r.repo_key()), q(&r.pull_tag())));
+        let r =
+            crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
+        let mut req = Req::post(format!(
+            "/images/create?fromImage={}&tag={}",
+            q(&r.repo_key()),
+            q(&r.pull_tag())
+        ));
         if let Some(a) = auth {
-            let j = json!({"username": a.username, "password": a.password, "serveraddress": a.server});
+            let j =
+                json!({"username": a.username, "password": a.password, "serveraddress": a.server});
             let enc = base64::engine::general_purpose::URL_SAFE.encode(j.to_string());
             req = req.header("x-registry-auth", enc);
         }
@@ -227,7 +244,10 @@ impl Runtime for HttpRuntime {
             if let Ok(v) = serde_json::from_str::<Value>(line) {
                 if let Some(e) = v.get("error").and_then(|e| e.as_str()) {
                     // Never echo credentials back; docker does not include them, but cap the length.
-                    return Err(RtError::Other(format!("pull failed: {}", e.chars().take(300).collect::<String>())));
+                    return Err(RtError::Other(format!(
+                        "pull failed: {}",
+                        e.chars().take(300).collect::<String>()
+                    )));
                 }
             }
         }
@@ -235,33 +255,53 @@ impl Runtime for HttpRuntime {
     }
 
     async fn resolve_digest(&self, image: &str, repo_key: &str) -> RtResult<String> {
-        let r = self.call(Req::get(format!("/images/{}/json", q(image))), Duration::from_secs(15)).await?;
+        let r = self
+            .call(
+                Req::get(format!("/images/{}/json", q(image))),
+                Duration::from_secs(15),
+            )
+            .await?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
         let v: Value = r.json().map_err(|e| RtError::Other(e.to_string()))?;
         let prefix = format!("{repo_key}@");
-        if let Some(d) = v["RepoDigests"].as_array().and_then(|a| a.iter().filter_map(|x| x.as_str()).find(|s| s.starts_with(&prefix))) {
+        if let Some(d) = v["RepoDigests"].as_array().and_then(|a| {
+            a.iter()
+                .filter_map(|x| x.as_str())
+                .find(|s| s.starts_with(&prefix))
+        }) {
             return Ok(d.to_string());
         }
         // Locally built or loaded image: fall back to the immutable image id.
-        v["Id"].as_str().map(String::from).ok_or_else(|| RtError::Other("image has no id".into()))
+        v["Id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| RtError::Other("image has no id".into()))
     }
 
     async fn create(&self, spec: &ContainerSpec) -> RtResult<String> {
         let mut spec = spec.clone();
         spec.network = self.network.clone();
-        let req = Req::post(format!("/containers/create?name={}", q(&spec.name))).json(&create_body(&spec));
+        let req = Req::post(format!("/containers/create?name={}", q(&spec.name)))
+            .json(&create_body(&spec));
         let r = self.call(req, Duration::from_secs(30)).await?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
         let v: Value = r.json().map_err(|e| RtError::Other(e.to_string()))?;
-        v["Id"].as_str().map(String::from).ok_or_else(|| RtError::Other("create returned no id".into()))
+        v["Id"]
+            .as_str()
+            .map(String::from)
+            .ok_or_else(|| RtError::Other("create returned no id".into()))
     }
 
     async fn start(&self, id: &str) -> RtResult<()> {
-        self.simple(Req::post(format!("/containers/{}/start", q(id))), Duration::from_secs(30)).await
+        self.simple(
+            Req::post(format!("/containers/{}/start", q(id))),
+            Duration::from_secs(30),
+        )
+        .await
     }
 
     async fn stop(&self, id: &str, timeout_secs: u32) -> RtResult<()> {
@@ -273,13 +313,20 @@ impl Runtime for HttpRuntime {
     }
 
     async fn kill(&self, id: &str) -> RtResult<()> {
-        self.simple(Req::post(format!("/containers/{}/kill", q(id))), Duration::from_secs(15)).await
+        self.simple(
+            Req::post(format!("/containers/{}/kill", q(id))),
+            Duration::from_secs(15),
+        )
+        .await
     }
 
     async fn remove(&self, id: &str, force: bool) -> RtResult<()> {
         let r = self
             .call(
-                Req::new(hyper::Method::DELETE, format!("/containers/{}?force={}&v=true", q(id), force)),
+                Req::new(
+                    hyper::Method::DELETE,
+                    format!("/containers/{}?force={}&v=true", q(id), force),
+                ),
                 Duration::from_secs(30),
             )
             .await?;
@@ -291,7 +338,12 @@ impl Runtime for HttpRuntime {
     }
 
     async fn inspect(&self, id: &str) -> RtResult<ContainerInfo> {
-        let r = self.call(Req::get(format!("/containers/{}/json", q(id))), Duration::from_secs(15)).await?;
+        let r = self
+            .call(
+                Req::get(format!("/containers/{}/json", q(id))),
+                Duration::from_secs(15),
+            )
+            .await?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
@@ -303,11 +355,19 @@ impl Runtime for HttpRuntime {
             .map(String::from);
         let labels = v["Config"]["Labels"]
             .as_object()
-            .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+            .map(|o| {
+                o.iter()
+                    .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                    .collect()
+            })
             .unwrap_or_default();
         Ok(ContainerInfo {
             id: v["Id"].as_str().unwrap_or(id).to_string(),
-            name: v["Name"].as_str().unwrap_or("").trim_start_matches('/').to_string(),
+            name: v["Name"]
+                .as_str()
+                .unwrap_or("")
+                .trim_start_matches('/')
+                .to_string(),
             running: st["Running"].as_bool().unwrap_or(false),
             status: st["Status"].as_str().unwrap_or("").to_string(),
             exit_code: st["ExitCode"].as_i64().unwrap_or(0),
@@ -321,23 +381,33 @@ impl Runtime for HttpRuntime {
     async fn list_containers(&self, label: Option<&str>) -> RtResult<Vec<ContainerSummary>> {
         let mut path = "/containers/json?all=1".to_string();
         if let Some(l) = label {
-            path.push_str(&format!("&filters={}", q(&json!({"label": [l]}).to_string())));
+            path.push_str(&format!(
+                "&filters={}",
+                q(&json!({"label": [l]}).to_string())
+            ));
         }
         let r = self.call(Req::get(path), Duration::from_secs(20)).await?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
         let v: Vec<Value> = r.json().map_err(|e| RtError::Other(e.to_string()))?;
-        Ok(v
-            .iter()
+        Ok(v.iter()
             .map(|c| ContainerSummary {
                 id: c["Id"].as_str().unwrap_or("").to_string(),
-                name: c["Names"][0].as_str().unwrap_or("").trim_start_matches('/').to_string(),
+                name: c["Names"][0]
+                    .as_str()
+                    .unwrap_or("")
+                    .trim_start_matches('/')
+                    .to_string(),
                 image_id: c["ImageID"].as_str().unwrap_or("").to_string(),
                 state: c["State"].as_str().unwrap_or("").to_string(),
                 labels: c["Labels"]
                     .as_object()
-                    .map(|o| o.iter().filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string()))).collect())
+                    .map(|o| {
+                        o.iter()
+                            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+                            .collect()
+                    })
                     .unwrap_or_default(),
             })
             .collect())
@@ -346,7 +416,10 @@ impl Runtime for HttpRuntime {
     async fn logs(&self, id: &str, tail: u32) -> RtResult<String> {
         let r = self
             .call(
-                Req::get(format!("/containers/{}/logs?stdout=1&stderr=1&timestamps=1&tail={tail}", q(id))),
+                Req::get(format!(
+                    "/containers/{}/logs?stdout=1&stderr=1&timestamps=1&tail={tail}",
+                    q(id)
+                )),
                 Duration::from_secs(20),
             )
             .await?;
@@ -358,23 +431,35 @@ impl Runtime for HttpRuntime {
 
     async fn logs_follow(&self, id: &str, tail: u32) -> RtResult<mpsc::Receiver<String>> {
         use http_body_util::BodyExt;
-        let req = Req::get(format!("/containers/{}/logs?stdout=1&stderr=1&timestamps=1&follow=1&tail={tail}", q(id)));
-        let resp = httpc::send_stream(&self.target, &req).await.map_err(|e| RtError::Unavailable(e.to_string()))?;
+        let req = Req::get(format!(
+            "/containers/{}/logs?stdout=1&stderr=1&timestamps=1&follow=1&tail={tail}",
+            q(id)
+        ));
+        let resp = httpc::send_stream(&self.target, &req)
+            .await
+            .map_err(|e| RtError::Unavailable(e.to_string()))?;
         if !resp.status().is_success() {
-            return Err(if resp.status().as_u16() == 404 { RtError::NotFound } else { RtError::Other("logs failed".into()) });
+            return Err(if resp.status().as_u16() == 404 {
+                RtError::NotFound
+            } else {
+                RtError::Other("logs failed".into())
+            });
         }
         let (tx, rx) = mpsc::channel::<String>(64);
         tokio::spawn(async move {
             let mut body = resp.into_body();
             let mut buf: Vec<u8> = Vec::new();
             while let Some(Ok(frame)) = body.frame().await {
-                let Some(data) = frame.data_ref() else { continue };
+                let Some(data) = frame.data_ref() else {
+                    continue;
+                };
                 buf.extend_from_slice(data);
                 // Emit only complete frames.
                 let mut i = 0;
                 let mut text = String::new();
                 while i + 8 <= buf.len() {
-                    let len = u32::from_be_bytes([buf[i + 4], buf[i + 5], buf[i + 6], buf[i + 7]]) as usize;
+                    let len = u32::from_be_bytes([buf[i + 4], buf[i + 5], buf[i + 6], buf[i + 7]])
+                        as usize;
                     if i + 8 + len > buf.len() {
                         break;
                     }
@@ -404,18 +489,23 @@ impl Runtime for HttpRuntime {
     }
 
     async fn list_images(&self) -> RtResult<Vec<ImageInfo>> {
-        let r = self.call(Req::get("/images/json"), Duration::from_secs(20)).await?;
+        let r = self
+            .call(Req::get("/images/json"), Duration::from_secs(20))
+            .await?;
         if !r.ok() {
             return Err(Self::map_err(&r));
         }
         let v: Vec<Value> = r.json().map_err(|e| RtError::Other(e.to_string()))?;
-        Ok(v
-            .iter()
+        Ok(v.iter()
             .map(|i| ImageInfo {
                 id: i["Id"].as_str().unwrap_or("").to_string(),
                 repo_digests: i["RepoDigests"]
                     .as_array()
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|x| x.as_str().map(String::from))
+                            .collect()
+                    })
                     .unwrap_or_default(),
                 size: i["Size"].as_u64().unwrap_or(0),
             })
@@ -424,7 +514,13 @@ impl Runtime for HttpRuntime {
 
     async fn remove_image(&self, id: &str) -> RtResult<()> {
         let r = self
-            .call(Req::new(hyper::Method::DELETE, format!("/images/{}?noprune=false", q(id))), Duration::from_secs(60))
+            .call(
+                Req::new(
+                    hyper::Method::DELETE,
+                    format!("/images/{}?noprune=false", q(id)),
+                ),
+                Duration::from_secs(60),
+            )
             .await?;
         if r.ok() || r.status == 404 {
             Ok(())
@@ -481,7 +577,11 @@ impl FakeRuntime {
     }
     /// Containers created from images containing this substring fail to start.
     pub fn fail_start_for(&self, image_substr: &str) {
-        self.st.lock().unwrap().fail_start_images.push(image_substr.to_string());
+        self.st
+            .lock()
+            .unwrap()
+            .fail_start_images
+            .push(image_substr.to_string());
     }
     /// The next `n` calls to `start` fail.
     pub fn fail_next_starts(&self, n: u32) {
@@ -494,7 +594,13 @@ impl FakeRuntime {
         s.oneshot_hang = hang;
     }
     pub fn containers(&self) -> Vec<FakeContainer> {
-        self.st.lock().unwrap().containers.values().cloned().collect()
+        self.st
+            .lock()
+            .unwrap()
+            .containers
+            .values()
+            .cloned()
+            .collect()
     }
     pub fn add_foreign_container(&self, name: &str, labels: &[(&str, &str)]) -> String {
         let mut s = self.st.lock().unwrap();
@@ -505,13 +611,25 @@ impl FakeRuntime {
             image: "x".into(),
             env: vec![],
             ram_limit_mb: 64,
-            labels: labels.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect(),
+            labels: labels
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect(),
             compat_caps: false,
             network: "rustle-net".into(),
             cmd: None,
             long_running: true,
         };
-        s.containers.insert(id.clone(), FakeContainer { id: id.clone(), spec, running: true, exit_code: 0, ip: "10.0.0.250".into() });
+        s.containers.insert(
+            id.clone(),
+            FakeContainer {
+                id: id.clone(),
+                spec,
+                running: true,
+                exit_code: 0,
+                ip: "10.0.0.250".into(),
+            },
+        );
         id
     }
     pub fn image_ids(&self) -> Vec<String> {
@@ -520,7 +638,11 @@ impl FakeRuntime {
     pub fn add_image(&self, id: &str, digests: &[&str]) {
         self.st.lock().unwrap().images.insert(
             id.into(),
-            ImageInfo { id: id.into(), repo_digests: digests.iter().map(|s| s.to_string()).collect(), size: 1000 },
+            ImageInfo {
+                id: id.into(),
+                repo_digests: digests.iter().map(|s| s.to_string()).collect(),
+                size: 1000,
+            },
         );
     }
     fn digest_of(image: &str) -> String {
@@ -540,18 +662,30 @@ impl Runtime for FakeRuntime {
         if let Some(m) = &s.fail_pull {
             return Err(RtError::Other(m.clone()));
         }
-        let r = crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
-        let digest = r.digest.clone().unwrap_or_else(|| Self::digest_of(&r.canonical()));
+        let r =
+            crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
+        let digest = r
+            .digest
+            .clone()
+            .unwrap_or_else(|| Self::digest_of(&r.canonical()));
         let id = format!("sha256:img{}", &digest[7..19]);
         let rd = format!("{}@{}", r.repo_key(), digest);
-        s.images.entry(id.clone()).or_insert(ImageInfo { id, repo_digests: vec![rd], size: 1000 });
+        s.images.entry(id.clone()).or_insert(ImageInfo {
+            id,
+            repo_digests: vec![rd],
+            size: 1000,
+        });
         Ok(())
     }
 
     async fn resolve_digest(&self, image: &str, repo_key: &str) -> RtResult<String> {
         let s = self.st.lock().unwrap();
-        let r = crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
-        let digest = r.digest.clone().unwrap_or_else(|| Self::digest_of(&r.canonical()));
+        let r =
+            crate::imageref::ImageRef::parse(image).map_err(|e| RtError::Other(e.to_string()))?;
+        let digest = r
+            .digest
+            .clone()
+            .unwrap_or_else(|| Self::digest_of(&r.canonical()));
         let want = format!("{repo_key}@{digest}");
         if s.images.values().any(|i| i.repo_digests.contains(&want)) {
             Ok(want)
@@ -572,7 +706,16 @@ impl Runtime for FakeRuntime {
         s.counter += 1;
         let id = format!("fake{:04}", s.counter);
         let ip = format!("10.0.0.{}", s.counter);
-        s.containers.insert(id.clone(), FakeContainer { id: id.clone(), spec: spec.clone(), running: false, exit_code: 0, ip });
+        s.containers.insert(
+            id.clone(),
+            FakeContainer {
+                id: id.clone(),
+                spec: spec.clone(),
+                running: false,
+                exit_code: 0,
+                ip,
+            },
+        );
         Ok(id)
     }
 
@@ -587,7 +730,10 @@ impl Runtime for FakeRuntime {
             s.fail_starts -= 1;
             return Err(RtError::Other("failed to start".into()));
         }
-        if s.fail_start_images.iter().any(|f| image.contains(f.as_str())) {
+        if s.fail_start_images
+            .iter()
+            .any(|f| image.contains(f.as_str()))
+        {
             return Err(RtError::Other("failed to start".into()));
         }
         let one = !s.containers[id].spec.long_running;
@@ -604,7 +750,13 @@ impl Runtime for FakeRuntime {
 
     async fn stop(&self, id: &str, _t: u32) -> RtResult<()> {
         let mut s = self.st.lock().unwrap();
-        let name = s.containers.get(id).ok_or(RtError::NotFound)?.spec.name.clone();
+        let name = s
+            .containers
+            .get(id)
+            .ok_or(RtError::NotFound)?
+            .spec
+            .name
+            .clone();
         s.calls.push(format!("stop {name}"));
         s.containers.get_mut(id).unwrap().running = false;
         Ok(())
@@ -612,7 +764,13 @@ impl Runtime for FakeRuntime {
 
     async fn kill(&self, id: &str) -> RtResult<()> {
         let mut s = self.st.lock().unwrap();
-        let name = s.containers.get(id).ok_or(RtError::NotFound)?.spec.name.clone();
+        let name = s
+            .containers
+            .get(id)
+            .ok_or(RtError::NotFound)?
+            .spec
+            .name
+            .clone();
         s.calls.push(format!("kill {name}"));
         let c = s.containers.get_mut(id).unwrap();
         c.running = false;
@@ -635,7 +793,11 @@ impl Runtime for FakeRuntime {
             id: c.id.clone(),
             name: c.spec.name.clone(),
             running: c.running,
-            status: if c.running { "running".into() } else { "exited".into() },
+            status: if c.running {
+                "running".into()
+            } else {
+                "exited".into()
+            },
             exit_code: c.exit_code,
             oom_killed: false,
             ip: Some(c.ip.clone()),
@@ -656,7 +818,11 @@ impl Runtime for FakeRuntime {
                 id: c.id.clone(),
                 name: c.spec.name.clone(),
                 image_id: c.spec.image.clone(),
-                state: if c.running { "running".into() } else { "exited".into() },
+                state: if c.running {
+                    "running".into()
+                } else {
+                    "exited".into()
+                },
                 labels: c.spec.labels.clone(),
             })
             .collect())
@@ -725,7 +891,11 @@ mod tests {
             labels: BTreeMap::from([("rustle.managed".to_string(), "1".to_string())]),
             compat_caps: compat,
             network: "rustle-net".into(),
-            cmd: if long { None } else { Some(vec!["node".into(), "job.js".into()]) },
+            cmd: if long {
+                None
+            } else {
+                Some(vec!["node".into(), "job.js".into()])
+            },
             long_running: long,
         }
     }
@@ -736,8 +906,29 @@ mod tests {
             let b = create_body(&spec(compat, long));
             let h = &b["HostConfig"];
             let s = b.to_string();
-            for forbidden in ["Binds", "Devices", "Mounts", "PidMode", "IpcMode", "UsernsMode", "UTSMode", "Sysctls", "CgroupParent", "Runtime", "Tmpfs", "VolumesFrom", "Links", "PortBindings", "PublishAllPorts", "ExtraHosts", "Dns"] {
-                assert!(!s.contains(&format!("\"{forbidden}\"")), "{forbidden} must never be emitted");
+            for forbidden in [
+                "Binds",
+                "Devices",
+                "Mounts",
+                "PidMode",
+                "IpcMode",
+                "UsernsMode",
+                "UTSMode",
+                "Sysctls",
+                "CgroupParent",
+                "Runtime",
+                "Tmpfs",
+                "VolumesFrom",
+                "Links",
+                "PortBindings",
+                "PublishAllPorts",
+                "ExtraHosts",
+                "Dns",
+            ] {
+                assert!(
+                    !s.contains(&format!("\"{forbidden}\"")),
+                    "{forbidden} must never be emitted"
+                );
             }
             assert_eq!(h["Privileged"], false);
             assert_eq!(h["NetworkMode"], "rustle-net");
@@ -745,9 +936,15 @@ mod tests {
             assert_eq!(h["MemorySwap"], h["Memory"], "no swap for containers");
             assert_eq!(h["CapDrop"], json!(["ALL"]));
             assert_eq!(h["SecurityOpt"], json!(["no-new-privileges"]));
-            assert!(h.get("MemorySwappiness").is_none(), "unsupported on cgroup v2");
+            assert!(
+                h.get("MemorySwappiness").is_none(),
+                "unsupported on cgroup v2"
+            );
             assert_eq!(h["CapAdd"].is_array(), compat);
-            assert_eq!(h["RestartPolicy"]["Name"], if long { "unless-stopped" } else { "no" });
+            assert_eq!(
+                h["RestartPolicy"]["Name"],
+                if long { "unless-stopped" } else { "no" }
+            );
             assert!(h["PidsLimit"].as_i64().unwrap() > 0);
         }
         let b = create_body(&spec(false, false));
@@ -785,28 +982,51 @@ mod tests {
         .await;
         let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
         // pull: in-band error is surfaced; credentials travel only in the header
-        let auth = RegistryAuth { username: "u".into(), password: "p".into(), server: "ghcr.io".into() };
+        let auth = RegistryAuth {
+            username: "u".into(),
+            password: "p".into(),
+            server: "ghcr.io".into(),
+        };
         let e = rt.pull("ghcr.io/o/a:v1", Some(&auth)).await.unwrap_err();
         assert!(e.to_string().contains("denied"));
         let reqs = m.requests();
-        assert_eq!(reqs[0].path, "/images/create?fromImage=ghcr.io%2Fo%2Fa&tag=v1");
+        assert_eq!(
+            reqs[0].path,
+            "/images/create?fromImage=ghcr.io%2Fo%2Fa&tag=v1"
+        );
         let hdr = reqs[0].header("x-registry-auth").unwrap();
-        let dec = base64::engine::general_purpose::URL_SAFE.decode(hdr).unwrap();
-        assert!(String::from_utf8(dec).unwrap().contains("\"serveraddress\":\"ghcr.io\""));
+        let dec = base64::engine::general_purpose::URL_SAFE
+            .decode(hdr)
+            .unwrap();
+        assert!(String::from_utf8(dec)
+            .unwrap()
+            .contains("\"serveraddress\":\"ghcr.io\""));
         assert!(!reqs[0].path.contains('p'.to_string().repeat(8).as_str()));
         // create
         let id = rt.create(&spec(false, true)).await.unwrap();
         assert_eq!(id, "abc123");
-        let creq = m.requests().into_iter().find(|r| r.path.starts_with("/containers/create")).unwrap();
+        let creq = m
+            .requests()
+            .into_iter()
+            .find(|r| r.path.starts_with("/containers/create"))
+            .unwrap();
         assert_eq!(creq.path, "/containers/create?name=rustle-a-12345678");
         assert_eq!(creq.json()["HostConfig"]["Privileged"], false);
         // inspect parses the IP on our network
         let info = rt.inspect("abc123").await.unwrap();
         assert!(info.running);
         assert_eq!(info.ip.as_deref(), Some("172.30.0.5"));
-        assert_eq!(info.labels.get("rustle.site").map(String::as_str), Some("s1"));
+        assert_eq!(
+            info.labels.get("rustle.site").map(String::as_str),
+            Some("s1")
+        );
         // digest resolution picks the matching repo
-        assert_eq!(rt.resolve_digest("ghcr.io/o/a:v1", "ghcr.io/o/a").await.unwrap(), "ghcr.io/o/a@sha256:2");
+        assert_eq!(
+            rt.resolve_digest("ghcr.io/o/a:v1", "ghcr.io/o/a")
+                .await
+                .unwrap(),
+            "ghcr.io/o/a@sha256:2"
+        );
         // start 204 ok, remove 404 tolerated
         rt.start("abc123").await.unwrap();
         rt.remove("abc123", true).await.unwrap();
@@ -824,7 +1044,10 @@ mod tests {
     async fn fake_roundtrip() {
         let f = FakeRuntime::new();
         f.pull("ghcr.io/o/a:1", None).await.unwrap();
-        let d = f.resolve_digest("ghcr.io/o/a:1", "ghcr.io/o/a").await.unwrap();
+        let d = f
+            .resolve_digest("ghcr.io/o/a:1", "ghcr.io/o/a")
+            .await
+            .unwrap();
         assert!(d.starts_with("ghcr.io/o/a@sha256:"));
         let id = f.create(&spec(false, true)).await.unwrap();
         assert!(f.create(&spec(false, true)).await.is_err(), "name conflict");

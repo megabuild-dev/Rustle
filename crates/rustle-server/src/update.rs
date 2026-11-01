@@ -16,7 +16,11 @@ const MAX_BINARY: usize = 40 * 1024 * 1024;
 pub fn parse_version(s: &str) -> Option<(u64, u64, u64)> {
     let core = s.trim().trim_start_matches('v').split(['-', '+']).next()?;
     let mut it = core.split('.');
-    let v = (it.next()?.parse().ok()?, it.next()?.parse().ok()?, it.next()?.parse().ok()?);
+    let v = (
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+        it.next()?.parse().ok()?,
+    );
     it.next().is_none().then_some(v)
 }
 
@@ -29,7 +33,10 @@ pub fn asset_name() -> String {
 }
 
 pub async fn check(state: &AppState) -> UpdateInfo {
-    let mut info = UpdateInfo { current: VERSION.to_string(), ..Default::default() };
+    let mut info = UpdateInfo {
+        current: VERSION.to_string(),
+        ..Default::default()
+    };
     if state.cfg.update_pubkey.is_none() {
         info.reason = Some("this build has no update-signing key; updates are disabled".into());
         return info;
@@ -50,38 +57,77 @@ fn decode_signature(raw: &[u8]) -> Option<Vec<u8>> {
         return Some(raw.to_vec());
     }
     let text = std::str::from_utf8(raw).ok()?.trim();
-    hex::decode(text).ok().filter(|v| v.len() == 64).or_else(|| {
-        use base64::Engine;
-        base64::engine::general_purpose::STANDARD.decode(text).ok().filter(|v| v.len() == 64)
-    })
+    hex::decode(text)
+        .ok()
+        .filter(|v| v.len() == 64)
+        .or_else(|| {
+            use base64::Engine;
+            base64::engine::general_purpose::STANDARD
+                .decode(text)
+                .ok()
+                .filter(|v| v.len() == 64)
+        })
 }
 
 /// Download, verify and install the latest release. On success the caller must exit the process
 /// so systemd starts the new binary; `maintenance` stays set so no new work begins meanwhile.
 pub async fn apply(state: &Arc<AppState>) -> AppResult<String> {
-    let pubkey = state.cfg.update_pubkey.ok_or_else(|| AppError::conflict("updates are disabled in this build"))?;
-    let rel = state.github.latest_release(&state.cfg.release_repo).await.map_err(|e| AppError::unavailable(e.to_string()))?;
+    let pubkey = state
+        .cfg
+        .update_pubkey
+        .ok_or_else(|| AppError::conflict("updates are disabled in this build"))?;
+    let rel = state
+        .github
+        .latest_release(&state.cfg.release_repo)
+        .await
+        .map_err(|e| AppError::unavailable(e.to_string()))?;
     if !is_newer(&rel.tag, VERSION) {
         return Err(AppError::conflict("already up to date"));
     }
     let name = asset_name();
-    let find = |n: &str| rel.assets.iter().find(|(a, _)| a == n).map(|(_, u)| u.clone());
-    let bin_url = find(&name).ok_or_else(|| AppError::unprocessable("no_asset", format!("release has no {name} asset")))?;
-    let sig_url = find(&format!("{name}.sig")).ok_or_else(|| AppError::unprocessable("no_signature", "release has no signature asset"))?;
+    let find = |n: &str| {
+        rel.assets
+            .iter()
+            .find(|(a, _)| a == n)
+            .map(|(_, u)| u.clone())
+    };
+    let bin_url = find(&name).ok_or_else(|| {
+        AppError::unprocessable("no_asset", format!("release has no {name} asset"))
+    })?;
+    let sig_url = find(&format!("{name}.sig"))
+        .ok_or_else(|| AppError::unprocessable("no_signature", "release has no signature asset"))?;
 
     state.maintenance.store(true, Ordering::SeqCst);
     let result = async {
         if !state.deployer.wait_all_idle(Duration::from_secs(120)).await {
-            return Err(AppError::conflict("deployments are still running; try again shortly"));
+            return Err(AppError::conflict(
+                "deployments are still running; try again shortly",
+            ));
         }
-        let bin = state.github.download(&bin_url, MAX_BINARY).await.map_err(|e| AppError::unavailable(e.to_string()))?;
-        let sig_raw = state.github.download(&sig_url, 4096).await.map_err(|e| AppError::unavailable(e.to_string()))?;
-        let sig = decode_signature(&sig_raw).ok_or_else(|| AppError::unprocessable("bad_signature", "signature file is malformed"))?;
+        let bin = state
+            .github
+            .download(&bin_url, MAX_BINARY)
+            .await
+            .map_err(|e| AppError::unavailable(e.to_string()))?;
+        let sig_raw = state
+            .github
+            .download(&sig_url, 4096)
+            .await
+            .map_err(|e| AppError::unavailable(e.to_string()))?;
+        let sig = decode_signature(&sig_raw).ok_or_else(|| {
+            AppError::unprocessable("bad_signature", "signature file is malformed")
+        })?;
         if !ed25519_verify(&pubkey, &bin, &sig) {
-            return Err(AppError::unprocessable("bad_signature", "signature verification failed; refusing to install"));
+            return Err(AppError::unprocessable(
+                "bad_signature",
+                "signature verification failed; refusing to install",
+            ));
         }
         if bin.len() < 1024 || &bin[..4] != b"\x7fELF" {
-            return Err(AppError::unprocessable("not_elf", "downloaded file is not an executable"));
+            return Err(AppError::unprocessable(
+                "not_elf",
+                "downloaded file is not an executable",
+            ));
         }
         install(&state.cfg.bin_dir, &bin).map_err(AppError::internal)?;
         Ok(rel.tag.clone())
@@ -91,7 +137,9 @@ pub async fn apply(state: &Arc<AppState>) -> AppResult<String> {
         state.maintenance.store(false, Ordering::SeqCst);
     }
     if let Ok(tag) = &result {
-        state.store.audit(crate::util::now(), "admin", "update.apply", tag);
+        state
+            .store
+            .audit(crate::util::now(), "admin", "update.apply", tag);
     }
     result
 }
@@ -138,7 +186,11 @@ mod tests {
         assert_eq!(parse_version("1.2"), None);
         assert_eq!(parse_version("x.y.z"), None);
         assert!(is_newer("v0.2.0", "0.1.9") && is_newer("1.0.0", "0.99.99"));
-        assert!(!is_newer("v0.1.0", "0.1.0") && !is_newer("0.0.9", "0.1.0") && !is_newer("garbage", "0.1.0"));
+        assert!(
+            !is_newer("v0.1.0", "0.1.0")
+                && !is_newer("0.0.9", "0.1.0")
+                && !is_newer("garbage", "0.1.0")
+        );
     }
 
     #[tokio::test]
@@ -163,7 +215,13 @@ mod tests {
         let bin = fake_elf("new");
         let sig = kp.sign(&bin);
         let name = asset_name();
-        e.github.set_release("v9.9.9", &[(name.as_str(), bin.as_slice()), (&format!("{name}.sig"), hex::encode(sig.as_ref()).as_bytes())]);
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), bin.as_slice()),
+                (&format!("{name}.sig"), hex::encode(sig.as_ref()).as_bytes()),
+            ],
+        );
         let dir = &e.state.cfg.bin_dir;
         std::fs::create_dir_all(dir).unwrap();
         std::fs::write(dir.join("rustle"), fake_elf("old")).unwrap();
@@ -171,10 +229,24 @@ mod tests {
         let tag = apply(&e.state).await.unwrap();
         assert_eq!(tag, "v9.9.9");
         assert_eq!(std::fs::read(dir.join("rustle")).unwrap(), bin);
-        assert_eq!(std::fs::read(dir.join("rustle.prev")).unwrap(), fake_elf("old"), "previous binary kept for auto-revert");
-        assert!(e.state.maintenance.load(Ordering::SeqCst), "stays in maintenance until the process restarts");
+        assert_eq!(
+            std::fs::read(dir.join("rustle.prev")).unwrap(),
+            fake_elf("old"),
+            "previous binary kept for auto-revert"
+        );
+        assert!(
+            e.state.maintenance.load(Ordering::SeqCst),
+            "stays in maintenance until the process restarts"
+        );
         use std::os::unix::fs::PermissionsExt;
-        assert_eq!(std::fs::metadata(dir.join("rustle")).unwrap().permissions().mode() & 0o777, 0o755);
+        assert_eq!(
+            std::fs::metadata(dir.join("rustle"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777,
+            0o755
+        );
     }
 
     #[tokio::test]
@@ -185,26 +257,51 @@ mod tests {
         let bin = fake_elf("new");
         // signed with a different key
         let e = env_with_key(pubkey);
-        e.github.set_release("v9.9.9", &[(name.as_str(), bin.as_slice()), (&format!("{name}.sig"), other.sign(&bin).as_ref())]);
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), bin.as_slice()),
+                (&format!("{name}.sig"), other.sign(&bin).as_ref()),
+            ],
+        );
         let err = apply(&e.state).await.unwrap_err();
         assert_eq!(err.code, "bad_signature");
-        assert!(!e.state.maintenance.load(Ordering::SeqCst), "maintenance released on failure");
-        assert!(!e.state.cfg.bin_dir.join("rustle").exists(), "nothing installed");
+        assert!(
+            !e.state.maintenance.load(Ordering::SeqCst),
+            "maintenance released on failure"
+        );
+        assert!(
+            !e.state.cfg.bin_dir.join("rustle").exists(),
+            "nothing installed"
+        );
         // binary modified after signing
         let e = env_with_key(pubkey);
         let sig = kp.sign(&bin);
         let mut tampered = bin.clone();
         tampered[10] ^= 1;
-        e.github.set_release("v9.9.9", &[(name.as_str(), tampered.as_slice()), (&format!("{name}.sig"), sig.as_ref())]);
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), tampered.as_slice()),
+                (&format!("{name}.sig"), sig.as_ref()),
+            ],
+        );
         assert_eq!(apply(&e.state).await.unwrap_err().code, "bad_signature");
         // no signature asset
         let e = env_with_key(pubkey);
-        e.github.set_release("v9.9.9", &[(name.as_str(), bin.as_slice())]);
+        e.github
+            .set_release("v9.9.9", &[(name.as_str(), bin.as_slice())]);
         assert_eq!(apply(&e.state).await.unwrap_err().code, "no_signature");
         // signed but not an ELF
         let e = env_with_key(pubkey);
         let junk = vec![b'x'; 2000];
-        e.github.set_release("v9.9.9", &[(name.as_str(), junk.as_slice()), (&format!("{name}.sig"), kp.sign(&junk).as_ref())]);
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), junk.as_slice()),
+                (&format!("{name}.sig"), kp.sign(&junk).as_ref()),
+            ],
+        );
         assert_eq!(apply(&e.state).await.unwrap_err().code, "not_elf");
         // older release
         let e = env_with_key(pubkey);
@@ -216,9 +313,19 @@ mod tests {
     fn signature_encodings() {
         let raw = vec![7u8; 64];
         assert_eq!(decode_signature(&raw), Some(raw.clone()));
-        assert_eq!(decode_signature(hex::encode(&raw).as_bytes()), Some(raw.clone()));
+        assert_eq!(
+            decode_signature(hex::encode(&raw).as_bytes()),
+            Some(raw.clone())
+        );
         use base64::Engine;
-        assert_eq!(decode_signature(base64::engine::general_purpose::STANDARD.encode(&raw).as_bytes()), Some(raw));
+        assert_eq!(
+            decode_signature(
+                base64::engine::general_purpose::STANDARD
+                    .encode(&raw)
+                    .as_bytes()
+            ),
+            Some(raw)
+        );
         assert_eq!(decode_signature(b"short"), None);
     }
 }

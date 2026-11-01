@@ -2,7 +2,10 @@ use rand::RngCore;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn now() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs() as i64).unwrap_or(0)
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
 }
 
 pub fn rand_hex(bytes: usize) -> String {
@@ -39,7 +42,8 @@ pub fn valid_domain(s: &str) -> bool {
             && b.len() <= 63
             && b[0] != b'-'
             && b[b.len() - 1] != b'-'
-            && b.iter().all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
+            && b.iter()
+                .all(|&c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == b'-')
     })
 }
 

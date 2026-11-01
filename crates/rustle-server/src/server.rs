@@ -26,7 +26,10 @@ pub fn build_state(cfg: Config, key: MasterKey, store: Store) -> Arc<AppState> {
             Arc::new(FakeGithub::new()),
         );
     }
-    let runtime: Arc<dyn Runtime> = Arc::new(HttpRuntime::new(Target::from(&cfg.docker), cfg.network.clone()));
+    let runtime: Arc<dyn Runtime> = Arc::new(HttpRuntime::new(
+        Target::from(&cfg.docker),
+        cfg.network.clone(),
+    ));
     let gateway: Arc<dyn Gateway> = Arc::new(HttpGateway::new(Target::from(&cfg.caddy_admin)));
     let github: Arc<dyn Github> = Arc::new(HttpGithub::new(cfg.github_api.clone()));
     AppState::new(cfg, store, key, runtime, gateway, github)
@@ -43,7 +46,8 @@ async fn shutdown_signal() {
 }
 
 pub async fn run(cfg: Config) -> Result<(), String> {
-    let key = MasterKey::load(&cfg.master_key_file, false).map_err(|e| format!("{e}. Run `rustle init` first."))?;
+    let key = MasterKey::load(&cfg.master_key_file, false)
+        .map_err(|e| format!("{e}. Run `rustle init` first."))?;
     let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
     if store.admin().map_err(|e| e.message)?.is_none() {
         return Err("not initialized: run `rustle init` first".into());
@@ -96,7 +100,9 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let mut servers = tokio::task::JoinSet::new();
     let mut started = 0;
     if let Some(addr) = &cfg.local_bind {
-        let l = tokio::net::TcpListener::bind(addr).await.map_err(|e| format!("bind {addr}: {e}"))?;
+        let l = tokio::net::TcpListener::bind(addr)
+            .await
+            .map_err(|e| format!("bind {addr}: {e}"))?;
         tracing::info!("listening on http://{addr}");
         let app = app.clone();
         let rx = stop_rx.clone();
@@ -108,7 +114,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         if let Some(dir) = path.parent() {
             let _ = std::fs::create_dir_all(dir);
         }
-        let l = tokio::net::UnixListener::bind(path).map_err(|e| format!("bind {}: {e}", path.display()))?;
+        let l = tokio::net::UnixListener::bind(path)
+            .map_err(|e| format!("bind {}: {e}", path.display()))?;
         {
             use std::os::unix::fs::PermissionsExt;
             let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660));
@@ -120,7 +127,9 @@ pub async fn run(cfg: Config) -> Result<(), String> {
         started += 1;
     }
     if started == 0 {
-        return Err("no listener configured (RUSTLE_BIND and RUSTLE_SOCKET are both disabled)".into());
+        return Err(
+            "no listener configured (RUSTLE_BIND and RUSTLE_SOCKET are both disabled)".into(),
+        );
     }
     shutdown_signal().await;
     let _ = stop_tx.send(true);

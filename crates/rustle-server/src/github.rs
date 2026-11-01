@@ -37,9 +37,31 @@ pub struct ReleaseInfo {
 #[async_trait]
 pub trait Github: Send + Sync {
     async fn repo_private(&self, token: &str, repo: &str) -> GhResult<bool>;
-    async fn put_file(&self, token: &str, repo: &str, branch: &str, path: &str, content: &[u8], message: &str) -> GhResult<()>;
-    async fn list_dir(&self, token: &str, repo: &str, branch: &str, dir: &str) -> GhResult<Vec<GhEntry>>;
-    async fn delete_file(&self, token: &str, repo: &str, branch: &str, path: &str, sha: &str, message: &str) -> GhResult<()>;
+    async fn put_file(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        path: &str,
+        content: &[u8],
+        message: &str,
+    ) -> GhResult<()>;
+    async fn list_dir(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        dir: &str,
+    ) -> GhResult<Vec<GhEntry>>;
+    async fn delete_file(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        path: &str,
+        sha: &str,
+        message: &str,
+    ) -> GhResult<()>;
     async fn latest_release(&self, repo: &str) -> GhResult<ReleaseInfo>;
     async fn download(&self, url: &str, max_bytes: usize) -> GhResult<Vec<u8>>;
 }
@@ -53,8 +75,15 @@ impl HttpGithub {
         Self { api }
     }
 
-    async fn call(&self, method: hyper::Method, path: &str, token: Option<&str>, body: Option<Value>) -> GhResult<httpc::Resp> {
-        let (target, base) = Target::from_url(&self.api).map_err(|e| GhError::Unreachable(e.to_string()))?;
+    async fn call(
+        &self,
+        method: hyper::Method,
+        path: &str,
+        token: Option<&str>,
+        body: Option<Value>,
+    ) -> GhResult<httpc::Resp> {
+        let (target, base) =
+            Target::from_url(&self.api).map_err(|e| GhError::Unreachable(e.to_string()))?;
         let mut req = Req::new(method, format!("{base}{path}"))
             .header("accept", "application/vnd.github+json")
             .header("x-github-api-version", "2022-11-28");
@@ -64,7 +93,9 @@ impl HttpGithub {
         if let Some(b) = body {
             req = req.json(&b);
         }
-        httpc::send(&target, &req, Duration::from_secs(30)).await.map_err(|e| GhError::Unreachable(e.to_string()))
+        httpc::send(&target, &req, Duration::from_secs(30))
+            .await
+            .map_err(|e| GhError::Unreachable(e.to_string()))
     }
 
     fn check(r: httpc::Resp) -> GhResult<httpc::Resp> {
@@ -75,35 +106,77 @@ impl HttpGithub {
             .ok()
             .and_then(|v| v["message"].as_str().map(String::from))
             .unwrap_or_else(|| r.text().chars().take(200).collect());
-        Err(GhError::Api { status: r.status, message })
+        Err(GhError::Api {
+            status: r.status,
+            message,
+        })
     }
 }
 
 fn enc_path(p: &str) -> String {
-    p.split('/').map(|s| urlencoding::encode(s).into_owned()).collect::<Vec<_>>().join("/")
+    p.split('/')
+        .map(|s| urlencoding::encode(s).into_owned())
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[async_trait]
 impl Github for HttpGithub {
     async fn repo_private(&self, token: &str, repo: &str) -> GhResult<bool> {
-        let r = Self::check(self.call(hyper::Method::GET, &format!("/repos/{repo}"), Some(token), None).await?)?;
+        let r = Self::check(
+            self.call(
+                hyper::Method::GET,
+                &format!("/repos/{repo}"),
+                Some(token),
+                None,
+            )
+            .await?,
+        )?;
         let v: Value = r.json().map_err(|e| GhError::Bad(e.to_string()))?;
         Ok(v["private"].as_bool().unwrap_or(false))
     }
 
-    async fn put_file(&self, token: &str, repo: &str, branch: &str, path: &str, content: &[u8], message: &str) -> GhResult<()> {
+    async fn put_file(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        path: &str,
+        content: &[u8],
+        message: &str,
+    ) -> GhResult<()> {
         let body = json!({
             "message": message,
             "content": base64::engine::general_purpose::STANDARD.encode(content),
             "branch": branch,
         });
-        Self::check(self.call(hyper::Method::PUT, &format!("/repos/{repo}/contents/{}", enc_path(path)), Some(token), Some(body)).await?)?;
+        Self::check(
+            self.call(
+                hyper::Method::PUT,
+                &format!("/repos/{repo}/contents/{}", enc_path(path)),
+                Some(token),
+                Some(body),
+            )
+            .await?,
+        )?;
         Ok(())
     }
 
-    async fn list_dir(&self, token: &str, repo: &str, branch: &str, dir: &str) -> GhResult<Vec<GhEntry>> {
-        let path = format!("/repos/{repo}/contents/{}?ref={}", enc_path(dir), urlencoding::encode(branch));
-        let r = self.call(hyper::Method::GET, &path, Some(token), None).await?;
+    async fn list_dir(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        dir: &str,
+    ) -> GhResult<Vec<GhEntry>> {
+        let path = format!(
+            "/repos/{repo}/contents/{}?ref={}",
+            enc_path(dir),
+            urlencoding::encode(branch)
+        );
+        let r = self
+            .call(hyper::Method::GET, &path, Some(token), None)
+            .await?;
         if r.status == 404 {
             return Ok(vec![]);
         }
@@ -119,14 +192,38 @@ impl Github for HttpGithub {
             .collect())
     }
 
-    async fn delete_file(&self, token: &str, repo: &str, branch: &str, path: &str, sha: &str, message: &str) -> GhResult<()> {
+    async fn delete_file(
+        &self,
+        token: &str,
+        repo: &str,
+        branch: &str,
+        path: &str,
+        sha: &str,
+        message: &str,
+    ) -> GhResult<()> {
         let body = json!({"message": message, "sha": sha, "branch": branch});
-        Self::check(self.call(hyper::Method::DELETE, &format!("/repos/{repo}/contents/{}", enc_path(path)), Some(token), Some(body)).await?)?;
+        Self::check(
+            self.call(
+                hyper::Method::DELETE,
+                &format!("/repos/{repo}/contents/{}", enc_path(path)),
+                Some(token),
+                Some(body),
+            )
+            .await?,
+        )?;
         Ok(())
     }
 
     async fn latest_release(&self, repo: &str) -> GhResult<ReleaseInfo> {
-        let r = Self::check(self.call(hyper::Method::GET, &format!("/repos/{repo}/releases/latest"), None, None).await?)?;
+        let r = Self::check(
+            self.call(
+                hyper::Method::GET,
+                &format!("/repos/{repo}/releases/latest"),
+                None,
+                None,
+            )
+            .await?,
+        )?;
         let v: Value = r.json().map_err(|e| GhError::Bad(e.to_string()))?;
         Ok(ReleaseInfo {
             tag: v["tag_name"].as_str().unwrap_or("").to_string(),
@@ -134,7 +231,12 @@ impl Github for HttpGithub {
                 .as_array()
                 .map(|a| {
                     a.iter()
-                        .filter_map(|x| Some((x["name"].as_str()?.to_string(), x["browser_download_url"].as_str()?.to_string())))
+                        .filter_map(|x| {
+                            Some((
+                                x["name"].as_str()?.to_string(),
+                                x["browser_download_url"].as_str()?.to_string(),
+                            ))
+                        })
                         .collect()
                 })
                 .unwrap_or_default(),
@@ -144,14 +246,23 @@ impl Github for HttpGithub {
     async fn download(&self, url: &str, max_bytes: usize) -> GhResult<Vec<u8>> {
         let mut url = url.to_string();
         for _ in 0..5 {
-            let (target, path) = Target::from_url(&url).map_err(|e| GhError::Unreachable(e.to_string()))?;
-            let r = httpc::send(&target, &Req::get(path), Duration::from_secs(120)).await.map_err(|e| GhError::Unreachable(e.to_string()))?;
+            let (target, path) =
+                Target::from_url(&url).map_err(|e| GhError::Unreachable(e.to_string()))?;
+            let r = httpc::send(&target, &Req::get(path), Duration::from_secs(120))
+                .await
+                .map_err(|e| GhError::Unreachable(e.to_string()))?;
             if (300..400).contains(&r.status) {
-                let loc = r.header("location").ok_or_else(|| GhError::Bad("redirect without location".into()))?.to_string();
+                let loc = r
+                    .header("location")
+                    .ok_or_else(|| GhError::Bad("redirect without location".into()))?
+                    .to_string();
                 url = if loc.starts_with('/') {
                     // relative redirect: keep scheme and host
                     let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
-                    let host_end = url[scheme_end..].find('/').map(|i| i + scheme_end).unwrap_or(url.len());
+                    let host_end = url[scheme_end..]
+                        .find('/')
+                        .map(|i| i + scheme_end)
+                        .unwrap_or(url.len());
                     format!("{}{}", &url[..host_end], loc)
                 } else {
                     loc
@@ -184,7 +295,12 @@ pub struct FakeGithub {
 
 impl Default for FakeGithub {
     fn default() -> Self {
-        Self { st: Mutex::new(FakeGhState { private: true, ..Default::default() }) }
+        Self {
+            st: Mutex::new(FakeGhState {
+                private: true,
+                ..Default::default()
+            }),
+        }
     }
 }
 
@@ -225,7 +341,15 @@ impl Github for FakeGithub {
     async fn repo_private(&self, _t: &str, _r: &str) -> GhResult<bool> {
         Ok(self.chk()?.private)
     }
-    async fn put_file(&self, _t: &str, _r: &str, _b: &str, path: &str, content: &[u8], _m: &str) -> GhResult<()> {
+    async fn put_file(
+        &self,
+        _t: &str,
+        _r: &str,
+        _b: &str,
+        path: &str,
+        content: &[u8],
+        _m: &str,
+    ) -> GhResult<()> {
         let mut s = self.chk()?;
         s.puts.push(path.to_string());
         s.files.insert(path.to_string(), content.to_vec());
@@ -236,13 +360,28 @@ impl Github for FakeGithub {
         Ok(s.files
             .keys()
             .filter(|p| p.starts_with(&format!("{dir}/")))
-            .map(|p| GhEntry { name: p.rsplit('/').next().unwrap().into(), path: p.clone(), sha: format!("sha-{p}") })
+            .map(|p| GhEntry {
+                name: p.rsplit('/').next().unwrap().into(),
+                path: p.clone(),
+                sha: format!("sha-{p}"),
+            })
             .collect())
     }
-    async fn delete_file(&self, _t: &str, _r: &str, _b: &str, path: &str, sha: &str, _m: &str) -> GhResult<()> {
+    async fn delete_file(
+        &self,
+        _t: &str,
+        _r: &str,
+        _b: &str,
+        path: &str,
+        sha: &str,
+        _m: &str,
+    ) -> GhResult<()> {
         let mut s = self.chk()?;
         if sha != format!("sha-{path}") {
-            return Err(GhError::Api { status: 409, message: "sha mismatch".into() });
+            return Err(GhError::Api {
+                status: 409,
+                message: "sha mismatch".into(),
+            });
         }
         s.files.remove(path);
         Ok(())
@@ -252,7 +391,10 @@ impl Github for FakeGithub {
     }
     async fn download(&self, url: &str, max: usize) -> GhResult<Vec<u8>> {
         let s = self.chk()?;
-        let d = s.downloads.get(url).cloned().ok_or(GhError::Api { status: 404, message: "no such asset".into() })?;
+        let d = s.downloads.get(url).cloned().ok_or(GhError::Api {
+            status: 404,
+            message: "no such asset".into(),
+        })?;
         if d.len() > max {
             return Err(GhError::Bad("download too large".into()));
         }
@@ -279,17 +421,41 @@ mod tests {
         .await;
         let gh = HttpGithub::new(format!("http://{}", m.addr));
         assert!(gh.repo_private("tok", "o/r").await.unwrap());
-        gh.put_file("tok", "o/r", "main", "backups/a b.enc", b"data", "msg").await.unwrap();
-        let put = m.requests().into_iter().find(|r| r.method == "PUT").unwrap();
+        gh.put_file("tok", "o/r", "main", "backups/a b.enc", b"data", "msg")
+            .await
+            .unwrap();
+        let put = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PUT")
+            .unwrap();
         assert_eq!(put.path, "/repos/o/r/contents/backups/a%20b.enc");
         assert_eq!(put.header("authorization").as_deref(), Some("Bearer tok"));
         let b = put.json();
         assert_eq!(b["branch"], "main");
-        assert_eq!(base64::engine::general_purpose::STANDARD.decode(b["content"].as_str().unwrap()).unwrap(), b"data");
+        assert_eq!(
+            base64::engine::general_purpose::STANDARD
+                .decode(b["content"].as_str().unwrap())
+                .unwrap(),
+            b"data"
+        );
         let l = gh.list_dir("tok", "o/r", "main", "backups").await.unwrap();
-        assert_eq!(l, vec![GhEntry { name: "a.enc".into(), path: "backups/a.enc".into(), sha: "s1".into() }]);
-        gh.delete_file("tok", "o/r", "main", "backups/a.enc", "s1", "rm").await.unwrap();
-        let del = m.requests().into_iter().find(|r| r.method == "DELETE").unwrap();
+        assert_eq!(
+            l,
+            vec![GhEntry {
+                name: "a.enc".into(),
+                path: "backups/a.enc".into(),
+                sha: "s1".into()
+            }]
+        );
+        gh.delete_file("tok", "o/r", "main", "backups/a.enc", "s1", "rm")
+            .await
+            .unwrap();
+        let del = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "DELETE")
+            .unwrap();
         assert_eq!(del.json()["sha"], "s1");
     }
 
@@ -304,9 +470,22 @@ mod tests {
         })
         .await;
         let gh = HttpGithub::new(format!("http://{}", m.addr));
-        assert!(gh.list_dir("t", "o/r", "main", "none").await.unwrap().is_empty());
-        let e = gh.put_file("t", "o/r", "main", "x", b"", "m").await.unwrap_err();
-        assert_eq!(e, GhError::Api { status: 422, message: "sha wasn't supplied".into() });
+        assert!(gh
+            .list_dir("t", "o/r", "main", "none")
+            .await
+            .unwrap()
+            .is_empty());
+        let e = gh
+            .put_file("t", "o/r", "main", "x", b"", "m")
+            .await
+            .unwrap_err();
+        assert_eq!(
+            e,
+            GhError::Api {
+                status: 422,
+                message: "sha wasn't supplied".into()
+            }
+        );
     }
 
     #[tokio::test]

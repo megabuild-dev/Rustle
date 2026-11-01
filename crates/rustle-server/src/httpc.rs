@@ -37,7 +37,10 @@ impl Target {
         if let Some(rest) = url.strip_prefix("https://") {
             let (hostport, path) = split_path(rest);
             let (host, port) = match hostport.rsplit_once(':') {
-                Some((h, p)) => (h.to_string(), p.parse().map_err(|_| HttpError::Url(url.into()))?),
+                Some((h, p)) => (
+                    h.to_string(),
+                    p.parse().map_err(|_| HttpError::Url(url.into()))?,
+                ),
                 None => (hostport.to_string(), 443),
             };
             Ok((Target::Tls(host, port), path))
@@ -89,7 +92,12 @@ pub struct Req {
 
 impl Req {
     pub fn new(method: Method, path: impl Into<String>) -> Self {
-        Req { method, path: path.into(), headers: Vec::new(), body: Bytes::new() }
+        Req {
+            method,
+            path: path.into(),
+            headers: Vec::new(),
+            body: Bytes::new(),
+        }
     }
     pub fn get(path: impl Into<String>) -> Self {
         Self::new(Method::GET, path)
@@ -103,7 +111,8 @@ impl Req {
     }
     pub fn json<T: serde::Serialize>(mut self, v: &T) -> Self {
         self.body = Bytes::from(serde_json::to_vec(v).expect("serializable"));
-        self.headers.push(("content-type".into(), "application/json".into()));
+        self.headers
+            .push(("content-type".into(), "application/json".into()));
         self
     }
     pub fn body(mut self, b: impl Into<Bytes>) -> Self {
@@ -130,7 +139,10 @@ impl Resp {
         serde_json::from_slice(&self.body).map_err(|e| HttpError::Http(format!("bad json: {e}")))
     }
     pub fn header(&self, k: &str) -> Option<&str> {
-        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.as_str())
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.as_str())
     }
 }
 
@@ -138,25 +150,34 @@ const MAX_BODY: usize = 8 * 1024 * 1024;
 
 fn build(target: &Target, r: &Req) -> Result<Request<Full<Bytes>>, HttpError> {
     let mut b = Request::builder().method(r.method.clone()).uri(&r.path);
-    b = b.header("host", target.host_header()).header("connection", "close").header("user-agent", "rustle");
+    b = b
+        .header("host", target.host_header())
+        .header("connection", "close")
+        .header("user-agent", "rustle");
     for (k, v) in &r.headers {
-        let name = HeaderName::from_bytes(k.as_bytes()).map_err(|e| HttpError::Http(e.to_string()))?;
+        let name =
+            HeaderName::from_bytes(k.as_bytes()).map_err(|e| HttpError::Http(e.to_string()))?;
         let val = HeaderValue::from_str(v).map_err(|e| HttpError::Http(e.to_string()))?;
         b = b.header(name, val);
     }
-    b.body(Full::new(r.body.clone())).map_err(|e| HttpError::Http(e.to_string()))
+    b.body(Full::new(r.body.clone()))
+        .map_err(|e| HttpError::Http(e.to_string()))
 }
 
 async fn handshake<S>(io: S, req: Request<Full<Bytes>>) -> Result<Response<Incoming>, HttpError>
 where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (mut sender, conn) =
-        hyper::client::conn::http1::handshake(TokioIo::new(io)).await.map_err(|e| HttpError::Connect(e.to_string()))?;
+    let (mut sender, conn) = hyper::client::conn::http1::handshake(TokioIo::new(io))
+        .await
+        .map_err(|e| HttpError::Connect(e.to_string()))?;
     tokio::spawn(async move {
         let _ = conn.await;
     });
-    sender.send_request(req).await.map_err(|e| HttpError::Http(e.to_string()))
+    sender
+        .send_request(req)
+        .await
+        .map_err(|e| HttpError::Http(e.to_string()))
 }
 
 fn tls_config() -> Arc<rustls::ClientConfig> {
@@ -180,7 +201,9 @@ pub async fn send_stream(target: &Target, r: &Req) -> Result<Response<Incoming>,
     let req = build(target, r)?;
     match target {
         Target::Tcp(addr) => {
-            let s = tokio::net::TcpStream::connect(addr).await.map_err(|e| HttpError::Connect(format!("{addr}: {e}")))?;
+            let s = tokio::net::TcpStream::connect(addr)
+                .await
+                .map_err(|e| HttpError::Connect(format!("{addr}: {e}")))?;
             let _ = s.set_nodelay(true);
             handshake(s, req).await
         }
@@ -194,7 +217,8 @@ pub async fn send_stream(target: &Target, r: &Req) -> Result<Response<Incoming>,
             let s = tokio::net::TcpStream::connect((host.as_str(), *port))
                 .await
                 .map_err(|e| HttpError::Connect(format!("{host}:{port}: {e}")))?;
-            let name = rustls::pki_types::ServerName::try_from(host.clone()).map_err(|e| HttpError::Connect(e.to_string()))?;
+            let name = rustls::pki_types::ServerName::try_from(host.clone())
+                .map_err(|e| HttpError::Connect(e.to_string()))?;
             let tls = tokio_rustls::TlsConnector::from(tls_config())
                 .connect(name, s)
                 .await
@@ -219,9 +243,15 @@ pub async fn send(target: &Target, r: &Req, timeout: Duration) -> Result<Resp, H
             .await
             .map_err(|_| HttpError::TooLarge)?
             .to_bytes();
-        Ok(Resp { status, headers, body })
+        Ok(Resp {
+            status,
+            headers,
+            body,
+        })
     };
-    tokio::time::timeout(timeout, fut).await.map_err(|_| HttpError::Timeout)?
+    tokio::time::timeout(timeout, fut)
+        .await
+        .map_err(|_| HttpError::Timeout)?
 }
 
 #[cfg(test)]
@@ -233,11 +263,21 @@ mod tests {
     async fn tcp_roundtrip_and_headers() {
         let m = MockHttp::start(|r| {
             assert_eq!(r.header("x-test").as_deref(), Some("1"));
-            (201, vec![("x-reply".into(), "yes".into())], format!("echo:{}", r.body_text()))
+            (
+                201,
+                vec![("x-reply".into(), "yes".into())],
+                format!("echo:{}", r.body_text()),
+            )
         })
         .await;
         let t = Target::Tcp(m.addr.clone());
-        let resp = send(&t, &Req::post("/a/b?c=d").header("x-test", "1").body("hi"), Duration::from_secs(5)).await.unwrap();
+        let resp = send(
+            &t,
+            &Req::post("/a/b?c=d").header("x-test", "1").body("hi"),
+            Duration::from_secs(5),
+        )
+        .await
+        .unwrap();
         assert_eq!(resp.status, 201);
         assert_eq!(resp.text(), "echo:hi");
         assert_eq!(resp.header("X-Reply"), Some("yes"));
@@ -251,20 +291,34 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let p = d.path().join("s.sock");
         let _m = MockHttp::start_unix(&p, |_| (200, vec![], "unix-ok".into())).await;
-        let resp = send(&Target::Unix(p), &Req::get("/x"), Duration::from_secs(5)).await.unwrap();
+        let resp = send(&Target::Unix(p), &Req::get("/x"), Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(resp.text(), "unix-ok");
     }
 
     #[tokio::test]
     async fn connect_error_and_timeout() {
-        let e = send(&Target::Tcp("127.0.0.1:1".into()), &Req::get("/"), Duration::from_secs(2)).await.unwrap_err();
+        let e = send(
+            &Target::Tcp("127.0.0.1:1".into()),
+            &Req::get("/"),
+            Duration::from_secs(2),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(e, HttpError::Connect(_)));
         let m = MockHttp::start(|_| {
             std::thread::sleep(Duration::from_millis(400));
             (200, vec![], String::new())
         })
         .await;
-        let e = send(&Target::Tcp(m.addr.clone()), &Req::get("/"), Duration::from_millis(100)).await.unwrap_err();
+        let e = send(
+            &Target::Tcp(m.addr.clone()),
+            &Req::get("/"),
+            Duration::from_millis(100),
+        )
+        .await
+        .unwrap_err();
         assert!(matches!(e, HttpError::Timeout));
     }
 

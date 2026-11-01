@@ -45,12 +45,17 @@ fn valid_tag(t: &str) -> bool {
     !b.is_empty()
         && b.len() <= 128
         && (b[0].is_ascii_alphanumeric() || b[0] == b'_')
-        && b.iter().all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-')
+        && b.iter()
+            .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-')
 }
 
 fn valid_digest(d: &str) -> bool {
     match d.strip_prefix("sha256:") {
-        Some(h) => h.len() == 64 && h.bytes().all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c)),
+        Some(h) => {
+            h.len() == 64
+                && h.bytes()
+                    .all(|c| c.is_ascii_digit() || (b'a'..=b'f').contains(&c))
+        }
         None => false,
     }
 }
@@ -60,7 +65,10 @@ impl ImageRef {
         if input.is_empty() || input.len() > 255 {
             return Err(ImageRefError("length"));
         }
-        if input.bytes().any(|c| c.is_ascii_whitespace() || c.is_ascii_control()) {
+        if input
+            .bytes()
+            .any(|c| c.is_ascii_whitespace() || c.is_ascii_control())
+        {
             return Err(ImageRefError("whitespace"));
         }
         let (rest, digest) = match input.rsplit_once('@') {
@@ -89,25 +97,35 @@ impl ImageRef {
             return Err(ImageRefError("empty path component"));
         }
         let first = parts[0];
-        let (host, path_parts): (String, Vec<&str>) =
-            if parts.len() > 1 && (first.contains('.') || first.contains(':') || first == "localhost") {
-                let h = first.to_ascii_lowercase();
-                parts.remove(0);
-                (h, parts)
-            } else {
-                let mut p = parts;
-                if p.len() == 1 {
-                    p.insert(0, "library");
-                }
-                ("docker.io".to_string(), p)
-            };
+        let (host, path_parts): (String, Vec<&str>) = if parts.len() > 1
+            && (first.contains('.') || first.contains(':') || first == "localhost")
+        {
+            let h = first.to_ascii_lowercase();
+            parts.remove(0);
+            (h, parts)
+        } else {
+            let mut p = parts;
+            if p.len() == 1 {
+                p.insert(0, "library");
+            }
+            ("docker.io".to_string(), p)
+        };
         if path_parts.is_empty() || !path_parts.iter().all(|c| valid_component(c)) {
             return Err(ImageRefError("repository path"));
         }
-        if host.len() > 253 || !host.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b':') {
+        if host.len() > 253
+            || !host
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b':')
+        {
             return Err(ImageRefError("registry host"));
         }
-        Ok(ImageRef { host, path: path_parts.join("/"), tag, digest })
+        Ok(ImageRef {
+            host,
+            path: path_parts.join("/"),
+            tag,
+            digest,
+        })
     }
 
     /// `host/path`, the identity compared against a site's registered repository.
@@ -197,9 +215,22 @@ mod tests {
     #[test]
     fn rejects_bypass_attempts() {
         for bad in [
-            "", " ghcr.io/o/a", "ghcr.io/o/a b", "ghcr.io//o/a", "ghcr.io/o/a:", "ghcr.io/o/a:../x", "ghcr.io/o/a:-x",
-            "ghcr.io/o/a@sha256:xyz", "ghcr.io/o/a@md5:abc", "ghcr.io/o/../a", "ghcr.io/o/a/", "ghcr.io/o/a\n:1",
-            "ghcr.io/o/-a", "ghcr.io/o/a..b", "ghcr.io/o/a;rm", "ghcr.io/o/a$x",
+            "",
+            " ghcr.io/o/a",
+            "ghcr.io/o/a b",
+            "ghcr.io//o/a",
+            "ghcr.io/o/a:",
+            "ghcr.io/o/a:../x",
+            "ghcr.io/o/a:-x",
+            "ghcr.io/o/a@sha256:xyz",
+            "ghcr.io/o/a@md5:abc",
+            "ghcr.io/o/../a",
+            "ghcr.io/o/a/",
+            "ghcr.io/o/a\n:1",
+            "ghcr.io/o/-a",
+            "ghcr.io/o/a..b",
+            "ghcr.io/o/a;rm",
+            "ghcr.io/o/a$x",
         ] {
             assert!(ImageRef::parse(bad).is_err(), "should reject {bad:?}");
         }
@@ -219,7 +250,9 @@ mod tests {
         // lookalike hosts do not match
         assert_ne!(
             parse_repo("ghcr.io/o/app").unwrap().repo_key(),
-            ImageRef::parse("ghcr.io.evil.com/o/app").unwrap().repo_key()
+            ImageRef::parse("ghcr.io.evil.com/o/app")
+                .unwrap()
+                .repo_key()
         );
     }
 }

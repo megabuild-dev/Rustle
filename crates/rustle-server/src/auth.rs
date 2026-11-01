@@ -47,7 +47,13 @@ impl AuthState {
     }
 
     pub fn issue(&self, tv: i64, at: i64) -> (String, String) {
-        let claims = Claims { sub: "admin".into(), iat: at, exp: at + SESSION_SECS, tv, sid: crate::util::rand_hex(8) };
+        let claims = Claims {
+            sub: "admin".into(),
+            iat: at,
+            exp: at + SESSION_SECS,
+            tv,
+            sid: crate::util::rand_hex(8),
+        };
         let payload = b64url(&serde_json::to_vec(&claims).expect("claims serialize"));
         let signing = format!("{HEADER_B64}.{payload}");
         let sig = b64url(&hmac_sha256(&self.jwt_key, signing.as_bytes()));
@@ -92,12 +98,19 @@ impl AuthState {
         let e = m.entry(ip.to_string()).or_insert((0, 0));
         e.0 += 1;
         // three free attempts, then 2,4,8… seconds up to 15 minutes
-        let delay = if e.0 <= 3 { 0 } else { (1i64 << (e.0 - 3).min(10)).min(900) };
+        let delay = if e.0 <= 3 {
+            0
+        } else {
+            (1i64 << (e.0 - 3).min(10)).min(900)
+        };
         e.1 = at + delay;
     }
 
     pub fn login_ok(&self, ip: &str) {
-        self.backoff.lock().unwrap_or_else(|p| p.into_inner()).remove(ip);
+        self.backoff
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(ip);
     }
 
     pub fn webhook_allowed(&self, token_id: &str, at: i64) -> bool {
@@ -140,7 +153,10 @@ pub fn client_ip(h: &HeaderMap) -> String {
 
 pub fn cookie_value(h: &HeaderMap, name: &str) -> Option<String> {
     let raw = h.get("cookie")?.to_str().ok()?;
-    raw.split(';').filter_map(|c| c.trim().split_once('=')).find(|(k, _)| *k == name).map(|(_, v)| v.to_string())
+    raw.split(';')
+        .filter_map(|c| c.trim().split_once('='))
+        .find(|(k, _)| *k == name)
+        .map(|(_, v)| v.to_string())
 }
 
 pub fn session_cookie(token: &str) -> String {
@@ -160,16 +176,30 @@ pub struct Admin {
 impl FromRequestParts<Arc<AppState>> for Admin {
     type Rejection = AppError;
 
-    async fn from_request_parts(parts: &mut Parts, state: &Arc<AppState>) -> Result<Self, Self::Rejection> {
-        let token = cookie_value(&parts.headers, COOKIE).ok_or_else(|| AppError::unauthorized("not signed in"))?;
-        let claims = state.auth.verify(&token, now()).ok_or_else(|| AppError::unauthorized("invalid or expired session"))?;
-        let (_, _, tv) = state.store.admin()?.ok_or_else(|| AppError::unauthorized("not initialized"))?;
+    async fn from_request_parts(
+        parts: &mut Parts,
+        state: &Arc<AppState>,
+    ) -> Result<Self, Self::Rejection> {
+        let token = cookie_value(&parts.headers, COOKIE)
+            .ok_or_else(|| AppError::unauthorized("not signed in"))?;
+        let claims = state
+            .auth
+            .verify(&token, now())
+            .ok_or_else(|| AppError::unauthorized("invalid or expired session"))?;
+        let (_, _, tv) = state
+            .store
+            .admin()?
+            .ok_or_else(|| AppError::unauthorized("not initialized"))?;
         if tv != claims.tv {
             return Err(AppError::unauthorized("session revoked"));
         }
         let csrf = state.auth.csrf_for(&claims.sid);
         if !matches!(parts.method, Method::GET | Method::HEAD | Method::OPTIONS) {
-            let got = parts.headers.get("x-csrf-token").and_then(|v| v.to_str().ok()).unwrap_or("");
+            let got = parts
+                .headers
+                .get("x-csrf-token")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
             if !ct_eq(got.as_bytes(), csrf.as_bytes()) {
                 return Err(AppError::forbidden("missing or invalid CSRF token"));
             }
@@ -197,7 +227,10 @@ pub fn deploy_token(state: &AppState, h: &HeaderMap) -> AppResult<TokenRow> {
         .filter(|t| t.starts_with(TOKEN_PREFIX) && t.len() < 200)
         .ok_or_else(|| AppError::unauthorized("missing deploy token"))?;
     let hash = crypto::sha256_hex(raw.as_bytes());
-    let row = state.store.find_active_token(&hash)?.ok_or_else(|| AppError::unauthorized("invalid deploy token"))?;
+    let row = state
+        .store
+        .find_active_token(&hash)?
+        .ok_or_else(|| AppError::unauthorized("invalid deploy token"))?;
     let at = now();
     if !state.auth.webhook_allowed(&row.id, at) {
         return Err(AppError::too_many("deploy webhook rate limit exceeded"));
@@ -253,7 +286,11 @@ mod tests {
         a.login_failed("1.2.3.4", 100); // 4th => 2s
         assert_eq!(a.login_wait("1.2.3.4", 100), 2);
         assert_eq!(a.login_wait("1.2.3.4", 102), 0);
-        assert_eq!(a.login_wait("9.9.9.9", 100), 0, "per-IP, never account-wide");
+        assert_eq!(
+            a.login_wait("9.9.9.9", 100),
+            0,
+            "per-IP, never account-wide"
+        );
         for _ in 0..30 {
             a.login_failed("1.2.3.4", 100);
         }
@@ -278,7 +315,11 @@ mod tests {
         let mut h = HeaderMap::new();
         assert_eq!(client_ip(&h), "local");
         h.insert("x-forwarded-for", "6.6.6.6, 203.0.113.5".parse().unwrap());
-        assert_eq!(client_ip(&h), "203.0.113.5", "client-supplied prefix is ignored");
+        assert_eq!(
+            client_ip(&h),
+            "203.0.113.5",
+            "client-supplied prefix is ignored"
+        );
     }
 
     #[test]

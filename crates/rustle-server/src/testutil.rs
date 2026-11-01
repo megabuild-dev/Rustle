@@ -22,7 +22,10 @@ pub struct Recorded {
 
 impl Recorded {
     pub fn header(&self, k: &str) -> Option<String> {
-        self.headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(k)).map(|(_, v)| v.clone())
+        self.headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(k))
+            .map(|(_, v)| v.clone())
     }
     pub fn body_text(&self) -> String {
         String::from_utf8_lossy(&self.body).into_owned()
@@ -77,7 +80,10 @@ impl MockHttp {
                 serve(TokioIo::new(s), h.clone(), log2.clone());
             }
         });
-        MockHttp { addr: path.display().to_string(), log }
+        MockHttp {
+            addr: path.display().to_string(),
+            log,
+        }
     }
 }
 
@@ -91,11 +97,23 @@ where
             let log = log.clone();
             async move {
                 let (parts, body) = req.into_parts();
-                let body = body.collect().await.map(|b| b.to_bytes().to_vec()).unwrap_or_default();
+                let body = body
+                    .collect()
+                    .await
+                    .map(|b| b.to_bytes().to_vec())
+                    .unwrap_or_default();
                 let rec = Recorded {
                     method: parts.method.to_string(),
-                    path: parts.uri.path_and_query().map(|p| p.to_string()).unwrap_or_default(),
-                    headers: parts.headers.iter().map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string())).collect(),
+                    path: parts
+                        .uri
+                        .path_and_query()
+                        .map(|p| p.to_string())
+                        .unwrap_or_default(),
+                    headers: parts
+                        .headers
+                        .iter()
+                        .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+                        .collect(),
                     body,
                 };
                 log.lock().unwrap().push(rec.clone());
@@ -107,6 +125,8 @@ where
                 Ok::<_, Infallible>(b.body(Full::new(Bytes::from(text))).unwrap())
             }
         });
-        let _ = hyper::server::conn::http1::Builder::new().serve_connection(io, svc).await;
+        let _ = hyper::server::conn::http1::Builder::new()
+            .serve_connection(io, svc)
+            .await;
     });
 }

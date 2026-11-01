@@ -11,14 +11,33 @@ pub fn CronPage() -> impl IntoView {
         ctx.tick.get();
         async move { api::get::<Vec<CronJobDto>>("/api/v1/cron").await }
     });
-    let sites = LocalResource::new(move || async move { api::get::<Vec<SiteDto>>("/api/v1/sites").await.unwrap_or_default() });
+    let sites = LocalResource::new(move || async move {
+        api::get::<Vec<SiteDto>>("/api/v1/sites")
+            .await
+            .unwrap_or_default()
+    });
     let open = RwSignal::new(None::<String>);
     let runs = RwSignal::new(Vec::<CronRunDto>::new());
-    let (name, sched, site, argv) = (RwSignal::new(String::new()), RwSignal::new("0 3 * * *".to_string()), RwSignal::new(String::new()), RwSignal::new(String::new()));
+    let (name, sched, site, argv) = (
+        RwSignal::new(String::new()),
+        RwSignal::new("0 3 * * *".to_string()),
+        RwSignal::new(String::new()),
+        RwSignal::new(String::new()),
+    );
 
     let add = move |_| {
-        let args: Vec<String> = argv.get_untracked().lines().map(|l| l.to_string()).filter(|l| !l.is_empty()).collect();
-        let req = CreateCronReq { name: name.get_untracked(), schedule: sched.get_untracked(), site_id: site.get_untracked(), argv: args };
+        let args: Vec<String> = argv
+            .get_untracked()
+            .lines()
+            .map(|l| l.to_string())
+            .filter(|l| !l.is_empty())
+            .collect();
+        let req = CreateCronReq {
+            name: name.get_untracked(),
+            schedule: sched.get_untracked(),
+            site_id: site.get_untracked(),
+            argv: args,
+        };
         spawn_local(async move {
             match api::call::<CronJobDto>("POST", "/api/v1/cron", js_json(&req)).await {
                 Ok(_) => {

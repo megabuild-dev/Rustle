@@ -5,11 +5,11 @@ use crate::util::civil;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CronExpr {
-    minutes: u64,  // bit per minute 0..59
-    hours: u32,    // 0..23
-    dom: u32,      // 1..31
-    months: u16,   // 1..12
-    dow: u8,       // 0..6 (Sunday = 0)
+    minutes: u64, // bit per minute 0..59
+    hours: u32,   // 0..23
+    dom: u32,     // 1..31
+    months: u16,  // 1..12
+    dow: u8,      // 0..6 (Sunday = 0)
     dom_star: bool,
     dow_star: bool,
 }
@@ -39,11 +39,18 @@ fn field(spec: &str, min: u32, max: u32, allow_7: bool) -> Result<(u64, bool), C
             }
             (min, max)
         } else if let Some((a, b)) = range.split_once('-') {
-            (a.parse().map_err(|_| err("bad number"))?, b.parse().map_err(|_| err("bad number"))?)
+            (
+                a.parse().map_err(|_| err("bad number"))?,
+                b.parse().map_err(|_| err("bad number"))?,
+            )
         } else {
             let v: u32 = range.parse().map_err(|_| err("bad number"))?;
             // `5/2` means 5-max step 2
-            if part.contains('/') { (v, max) } else { (v, v) }
+            if part.contains('/') {
+                (v, max)
+            } else {
+                (v, v)
+            }
         };
         let top = if allow_7 { max + 1 } else { max };
         if lo < min || hi > top || lo > hi {
@@ -84,7 +91,10 @@ impl CronExpr {
     /// Does the expression fire in the minute containing unix time `ts`?
     pub fn matches(&self, ts: i64) -> bool {
         let (_, mo, d, h, mi, wd) = civil(ts);
-        if self.minutes & (1 << mi) == 0 || self.hours & (1 << h) == 0 || self.months & (1 << mo) == 0 {
+        if self.minutes & (1 << mi) == 0
+            || self.hours & (1 << h) == 0
+            || self.months & (1 << mo) == 0
+        {
             return false;
         }
         let dom_ok = self.dom & (1 << d) != 0;
@@ -132,7 +142,11 @@ mod tests {
         assert!(e.matches(base + 2 * 3600 + 45 * 60)); // 10:45
         assert!(!e.matches(base + 3 * 3600)); // 11:00
         let e = CronExpr::parse("5,10 * * * *").unwrap();
-        assert!(e.matches(SUN_0200 + 5 * 60) && e.matches(SUN_0200 + 10 * 60) && !e.matches(SUN_0200 + 6 * 60));
+        assert!(
+            e.matches(SUN_0200 + 5 * 60)
+                && e.matches(SUN_0200 + 10 * 60)
+                && !e.matches(SUN_0200 + 6 * 60)
+        );
         let e = CronExpr::parse("10/20 * * * *").unwrap(); // 10, 30, 50
         assert!(e.matches(SUN_0200 + 30 * 60) && !e.matches(SUN_0200 + 20 * 60));
     }
@@ -155,7 +169,21 @@ mod tests {
 
     #[test]
     fn rejects_garbage() {
-        for bad in ["", "* * * *", "* * * * * *", "60 * * * *", "* 24 * * *", "* * 0 * *", "* * * 13 *", "* * * * 8", "a * * * *", "*/0 * * * *", "5-1 * * * *", ",1 * * * *", "1,,2 * * * *"] {
+        for bad in [
+            "",
+            "* * * *",
+            "* * * * * *",
+            "60 * * * *",
+            "* 24 * * *",
+            "* * 0 * *",
+            "* * * 13 *",
+            "* * * * 8",
+            "a * * * *",
+            "*/0 * * * *",
+            "5-1 * * * *",
+            ",1 * * * *",
+            "1,,2 * * * *",
+        ] {
             assert!(CronExpr::parse(bad).is_err(), "should reject {bad:?}");
         }
     }

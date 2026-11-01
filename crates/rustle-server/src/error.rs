@@ -15,7 +15,11 @@ pub type AppResult<T> = Result<T, AppError>;
 
 impl AppError {
     pub fn new(status: StatusCode, code: &'static str, message: impl Into<String>) -> Self {
-        Self { status, code, message: message.into() }
+        Self {
+            status,
+            code,
+            message: message.into(),
+        }
     }
     pub fn bad_request(message: impl Into<String>) -> Self {
         Self::new(StatusCode::BAD_REQUEST, "bad_request", message)
@@ -41,7 +45,11 @@ impl AppError {
     pub fn internal(err: impl std::fmt::Display) -> Self {
         // Details go to the log, never to the client.
         tracing::error!("internal error: {err}");
-        Self::new(StatusCode::INTERNAL_SERVER_ERROR, "internal", "internal error")
+        Self::new(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "internal",
+            "internal error",
+        )
     }
     pub fn unavailable(message: impl Into<String>) -> Self {
         Self::new(StatusCode::SERVICE_UNAVAILABLE, "unavailable", message)
@@ -69,7 +77,12 @@ impl From<rusqlite::Error> for AppError {
 
 impl IntoResponse for AppError {
     fn into_response(self) -> Response {
-        let body = ApiError { error: ApiErrorBody { code: self.code.to_string(), message: self.message } };
+        let body = ApiError {
+            error: ApiErrorBody {
+                code: self.code.to_string(),
+                message: self.message,
+            },
+        };
         (self.status, Json(body)).into_response()
     }
 }

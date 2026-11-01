@@ -19,13 +19,16 @@ const ALPHABET: &[u8] = b"abcdefghijkmnopqrstuvwxyzABCDEFGHJKLMNPQRSTUVWXYZ23456
 
 pub fn random_password(len: usize) -> String {
     let mut rng = rand::rng();
-    (0..len).map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char).collect()
+    (0..len)
+        .map(|_| ALPHABET[rng.random_range(0..ALPHABET.len())] as char)
+        .collect()
 }
 
 /// Idempotent first-run setup: master key, admin account, baseline RAM measurement, system jobs.
 pub fn init(cfg: &Config, reset_password: bool) -> Result<InitResult, String> {
     let existed = cfg.master_key_file.exists();
-    let key = MasterKey::load(&cfg.master_key_file, true).map_err(|e| format!("master key: {e}"))?;
+    let key =
+        MasterKey::load(&cfg.master_key_file, true).map_err(|e| format!("master key: {e}"))?;
     let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
     let mut password = None;
     if store.admin().map_err(|e| e.message)?.is_none() || reset_password {
@@ -39,39 +42,68 @@ pub fn init(cfg: &Config, reset_password: bool) -> Result<InitResult, String> {
         password = Some(pw);
     }
     // Baseline RAM in use before any site runs: the budget is derived from it.
-    if store.setting("base_used_mb").map_err(|e| e.message)?.is_none() {
+    if store
+        .setting("base_used_mb")
+        .map_err(|e| e.message)?
+        .is_none()
+    {
         let m = metrics::meminfo(&cfg.proc_root);
         if m.total_kb > 0 {
             let used = (m.total_kb.saturating_sub(m.available_kb) / 1024).max(1);
-            store.set_setting("base_used_mb", &used.to_string()).map_err(|e| e.message)?;
+            store
+                .set_setting("base_used_mb", &used.to_string())
+                .map_err(|e| e.message)?;
         }
     }
-    for (env, key) in [("RUSTLE_PUBLIC_IP", "public_ip"), ("RUSTLE_ADMIN_DOMAIN", "admin_domain"), ("RUSTLE_ACME_EMAIL", "acme_email")] {
+    for (env, key) in [
+        ("RUSTLE_PUBLIC_IP", "public_ip"),
+        ("RUSTLE_ADMIN_DOMAIN", "admin_domain"),
+        ("RUSTLE_ACME_EMAIL", "acme_email"),
+    ] {
         if let Some(v) = std::env::var(env).ok().filter(|v| !v.trim().is_empty()) {
             store.set_setting(key, v.trim()).map_err(|e| e.message)?;
         }
     }
     crate::jobs::seed_system_jobs(&store).map_err(|e| e.message)?;
-    Ok(InitResult { key_created: !existed, key_hex: key.to_hex(), password })
+    Ok(InitResult {
+        key_created: !existed,
+        key_hex: key.to_hex(),
+        password,
+    })
 }
 
 pub fn restore(cfg: &Config, file: &std::path::Path, force: bool) -> Result<(), String> {
-    let key = MasterKey::load(&cfg.master_key_file, false).map_err(|e| format!("master key: {e}"))?;
+    let key =
+        MasterKey::load(&cfg.master_key_file, false).map_err(|e| format!("master key: {e}"))?;
     let blob = std::fs::read(file).map_err(|e| format!("{}: {e}", file.display()))?;
     backup::restore_to(&key, &blob, &cfg.db_path, force)
 }
 
 pub fn key_export(cfg: &Config) -> Result<String, String> {
-    Ok(MasterKey::load(&cfg.master_key_file, false).map_err(|e| format!("master key: {e}"))?.to_hex())
+    Ok(MasterKey::load(&cfg.master_key_file, false)
+        .map_err(|e| format!("master key: {e}"))?
+        .to_hex())
 }
 
 /// Initial Caddy configuration for `install.sh` (written to disk before Caddy first starts).
 pub fn caddy_config(cfg: &Config) -> Result<String, String> {
     let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
     let p = BaseParams {
-        admin_domain: store.setting("admin_domain").ok().flatten().filter(|d| !d.is_empty()),
-        acme_email: store.setting("acme_email").ok().flatten().filter(|d| !d.is_empty()),
-        public_ip: store.setting("public_ip").ok().flatten().or_else(|| cfg.public_ip.clone()),
+        admin_domain: store
+            .setting("admin_domain")
+            .ok()
+            .flatten()
+            .filter(|d| !d.is_empty()),
+        acme_email: store
+            .setting("acme_email")
+            .ok()
+            .flatten()
+            .filter(|d| !d.is_empty()),
+        public_ip: store
+            .setting("public_ip")
+            .ok()
+            .flatten()
+            .or_else(|| cfg.public_ip.clone()),
         admin_upstream: cfg.admin_upstream.clone(),
         admin_listen: String::new(),
     };
@@ -85,7 +117,11 @@ mod tests {
     fn cfg(d: &std::path::Path) -> Config {
         let c = Config::for_tests(d);
         std::fs::create_dir_all(&c.proc_root).unwrap();
-        std::fs::write(c.proc_root.join("meminfo"), "MemTotal: 1015808 kB\nMemAvailable: 760000 kB\n").unwrap();
+        std::fs::write(
+            c.proc_root.join("meminfo"),
+            "MemTotal: 1015808 kB\nMemAvailable: 760000 kB\n",
+        )
+        .unwrap();
         c
     }
 
@@ -99,19 +135,32 @@ mod tests {
         assert_eq!(pw.len(), 24);
         // the stored hash verifies the printed password
         let st = Store::open(&c.db_path).unwrap();
-        assert!(crypto::verify_password(&pw, &st.admin().unwrap().unwrap().1));
+        assert!(crypto::verify_password(
+            &pw,
+            &st.admin().unwrap().unwrap().1
+        ));
         assert_eq!(st.setting("base_used_mb").unwrap().as_deref(), Some("249"));
         assert_eq!(st.list_cron().unwrap().len(), 4);
         drop(st);
         let second = init(&c, false).unwrap();
-        assert!(!second.key_created && second.password.is_none(), "re-running never reveals or changes anything");
+        assert!(
+            !second.key_created && second.password.is_none(),
+            "re-running never reveals or changes anything"
+        );
         assert_eq!(second.key_hex, first.key_hex);
         let third = init(&c, true).unwrap();
         let new_pw = third.password.unwrap();
         assert_ne!(new_pw, pw);
         let st = Store::open(&c.db_path).unwrap();
-        assert!(crypto::verify_password(&new_pw, &st.admin().unwrap().unwrap().1));
-        assert_eq!(st.admin().unwrap().unwrap().2, 1, "reset revokes existing sessions");
+        assert!(crypto::verify_password(
+            &new_pw,
+            &st.admin().unwrap().unwrap().1
+        ));
+        assert_eq!(
+            st.admin().unwrap().unwrap().2,
+            1,
+            "reset revokes existing sessions"
+        );
     }
 
     #[test]
@@ -124,7 +173,11 @@ mod tests {
         let snap = d.path().join("snap.db");
         crate::store::snapshot_to(&c.db_path, &snap).unwrap();
         let enc = d.path().join("b.enc");
-        std::fs::write(&enc, key.seal(&std::fs::read(&snap).unwrap(), b"rustle-backup-v1")).unwrap();
+        std::fs::write(
+            &enc,
+            key.seal(&std::fs::read(&snap).unwrap(), b"rustle-backup-v1"),
+        )
+        .unwrap();
         let mut c2 = cfg(&d.path().join("new-vps"));
         c2.master_key_file = c.master_key_file.clone();
         std::fs::create_dir_all(d.path().join("new-vps")).unwrap();
