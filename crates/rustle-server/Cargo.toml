@@ -45,6 +45,8 @@ anyhow = "1"
 async-trait = "0.1"
 rust-embed = "8"
 urlencoding = "2"
+tokio-stream = { version = "0.1", default-features = false }
+libc = "0.2"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

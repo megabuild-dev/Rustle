@@ -455,6 +455,7 @@ struct FakeState {
     calls: Vec<String>,
     fail_pull: Option<String>,
     fail_start_images: Vec<String>,
+    fail_starts: u32,
     oneshot_exit: i64,
     oneshot_logs: String,
     oneshot_hang: bool,
@@ -481,6 +482,10 @@ impl FakeRuntime {
     /// Containers created from images containing this substring fail to start.
     pub fn fail_start_for(&self, image_substr: &str) {
         self.st.lock().unwrap().fail_start_images.push(image_substr.to_string());
+    }
+    /// The next `n` calls to `start` fail.
+    pub fn fail_next_starts(&self, n: u32) {
+        self.st.lock().unwrap().fail_starts = n;
     }
     pub fn set_oneshot(&self, exit: i64, logs: &str, hang: bool) {
         let mut s = self.st.lock().unwrap();
@@ -578,6 +583,10 @@ impl Runtime for FakeRuntime {
             (c.spec.image.clone(), c.spec.name.clone())
         };
         s.calls.push(format!("start {name}"));
+        if s.fail_starts > 0 {
+            s.fail_starts -= 1;
+            return Err(RtError::Other("failed to start".into()));
+        }
         if s.fail_start_images.iter().any(|f| image.contains(f.as_str())) {
             return Err(RtError::Other("failed to start".into()));
         }

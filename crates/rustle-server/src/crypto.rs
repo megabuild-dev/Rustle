@@ -132,6 +132,12 @@ fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::write(path, data)
 }
 
+pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {
+    let mut m = <HmacSha256 as Mac>::new_from_slice(key).expect("hmac accepts any key length");
+    m.update(data);
+    m.finalize().into_bytes().to_vec()
+}
+
 pub fn sha256_hex(data: &[u8]) -> String {
     hex::encode(Sha256::digest(data))
 }
