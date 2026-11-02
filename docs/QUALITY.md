@@ -58,6 +58,9 @@ not compile, which is most of the handler-returning-`Json` replacements):
 | non-terminating mutants (`cron::field` `step==0`, `docker::logs_follow` `i += 8+len` -> `*=`) | the mutated loop never ends; cargo-mutants reports a timeout, i.e. the suite cannot pass |
 | `release_memory`, `tune_allocator`, `init_logging`, `serve`, `shutdown_signal`, `run` -> `Ok(())`, `dev_flags` wrapper | excluded in `.cargo/mutants.toml`: process-global side effects or a signal; covered by `scripts/e2e-*.sh`, `scripts/rss_smoke.py` and the systemd unit |
 
+`minimum_test_timeout = 60` in the config: mutants that leave a deployment slot busy make dozens of tests
+fail slowly, and must be reported as caught rather than as timeouts.
+
 ### Hardening found by the exercise
 
 * `Deployer`: a panic inside the run loop left the site "busy" forever in debug/test builds; a `SlotGuard`
