@@ -607,6 +607,8 @@ struct FakeState {
     fail_pull: Option<String>,
     fail_start_images: Vec<String>,
     fail_starts: u32,
+    /// Next started long-running container exits immediately with this code.
+    crash_next: Option<i64>,
     oneshot_exit: i64,
     oneshot_logs: String,
     oneshot_hang: bool,
@@ -648,6 +650,10 @@ impl FakeRuntime {
     /// The next `n` calls to `start` fail.
     pub fn fail_next_starts(&self, n: u32) {
         self.st.lock().unwrap().fail_starts = n;
+    }
+    /// The next container that starts exits at once with `code` (a crash-looping app).
+    pub fn crash_next_start(&self, code: i64) {
+        self.st.lock().unwrap().crash_next = Some(code);
     }
     pub fn set_oneshot(&self, exit: i64, logs: &str, hang: bool) {
         let mut s = self.st.lock().unwrap();
@@ -810,6 +816,12 @@ impl Runtime for FakeRuntime {
             return Err(RtError::Other("failed to start".into()));
         }
         let one = !s.containers[id].spec.long_running;
+        if let Some(code) = s.crash_next.take() {
+            let c = s.containers.get_mut(id).unwrap();
+            c.running = false;
+            c.exit_code = code;
+            return Ok(());
+        }
         let exit = s.oneshot_exit;
         let hang = s.oneshot_hang;
         let c = s.containers.get_mut(id).unwrap();

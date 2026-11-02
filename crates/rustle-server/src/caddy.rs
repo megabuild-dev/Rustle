@@ -677,6 +677,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn exists_and_remove_by_id_status_handling() {
+        let reply = |code: u16, body: &'static str| {
+            move |_: &crate::testutil::Recorded| (code, vec![], body.to_string())
+        };
+        for (code, body, want) in [
+            (200u16, "{}", Some(true)),
+            (404, "", Some(false)),
+            (500, "unknown object ID: x", Some(false)),
+            (500, "something else broke", None),
+            (400, "bad", None),
+            (403, "", None),
+        ] {
+            let m = MockHttp::start(reply(code, body)).await;
+            let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
+            let got = gw.exists("site-a").await;
+            match want {
+                Some(w) => assert_eq!(got.unwrap(), w, "{code} {body}"),
+                None => assert!(got.is_err(), "{code} {body}"),
+            }
+            // removal tolerates what exists() calls "absent", and surfaces everything else
+            let removed = gw.remove_by_id("site-a").await;
+            let ok =
+                matches!(code, 200 | 404) || (code == 500 && body.contains("unknown object ID"));
+            assert_eq!(removed.is_ok(), ok, "remove {code} {body}");
+            assert_eq!(m.requests()[1].method, "DELETE");
+            assert_eq!(m.requests()[1].path, "/id/site-a");
+        }
+    }
+
+    #[tokio::test]
+    async fn external_server_choice_rules() {
+        let pick = |servers: &'static str| async move {
+            let m = MockHttp::start(move |_| (200, vec![], servers.to_string())).await;
+            let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+            gw.server().await
+        };
+        // exactly one :443 listener wins, even among several servers
+        assert_eq!(
+            pick("{\"a\":{\"listen\":[\":8080\"]},\"b\":{\"listen\":[\"0.0.0.0:443\"]}}")
+                .await
+                .unwrap(),
+            "b"
+        );
+        // no :443 listener but a single server: use it
+        assert_eq!(
+            pick("{\"only\":{\"listen\":[\":8080\"]}}").await.unwrap(),
+            "only"
+        );
+        // ambiguous: refuse rather than guess
+        assert!(
+            pick("{\"a\":{\"listen\":[\":8080\"]},\"b\":{\"listen\":[\":9090\"]}}")
+                .await
+                .is_err()
+        );
+        assert!(
+            pick("{\"a\":{\"listen\":[\":443\"]},\"b\":{\"listen\":[\":443\"]}}")
+                .await
+                .is_err()
+        );
+        assert!(pick("{}").await.is_err(), "no servers at all");
+        assert!(pick("null").await.is_err());
+        // an explicit name always wins and skips discovery; managed mode is always `main`
+        let gw =
+            HttpGateway::with_options(Target::Tcp("127.0.0.1:1".into()), true, Some("srv9".into()));
+        assert_eq!(gw.server().await.unwrap(), "srv9");
+        let gw = HttpGateway::new(Target::Tcp("127.0.0.1:1".into()));
+        assert_eq!(gw.server().await.unwrap(), "main");
+        // the answer is cached
+        let m = MockHttp::start(|_| (200, vec![], "{\"x\":{\"listen\":[\":443\"]}}".into())).await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        gw.server().await.unwrap();
+        gw.server().await.unwrap();
+        assert_eq!(m.requests().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn fake_gateway_records_calls_in_order() {
+        let g = FakeGateway::new();
+        g.upsert_site("a", "a.example.com", "10.0.0.1:3000")
+            .await
+            .unwrap();
+        g.set_upstream("a", "10.0.0.2:3000").await.unwrap();
+        assert!(g.set_upstream("zzz", "x").await.is_err());
+        g.remove_site("a").await.unwrap();
+        assert_eq!(
+            g.calls(),
+            vec![
+                "upsert a a.example.com 10.0.0.1:3000",
+                "upstream a 10.0.0.2:3000",
+                "upstream zzz x",
+                "remove a",
+            ]
+        );
+        g.clear_calls();
+        assert!(g.calls().is_empty());
+    }
+
+    #[tokio::test]
     async fn set_admin_covers_every_mode() {
         // external, no domain: the catch-all route must not exist, so it is removed
         let m = MockHttp::start(external_mock("{\"srv0\":{\"listen\":[\":443\"]}}", true)).await;

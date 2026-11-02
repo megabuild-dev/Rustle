@@ -1,0 +1,7 @@
+# cargo-mutants configuration (see docs/QUALITY.md)
+# Mutants that cannot be observed from a test are excluded here, each with its reason.
+exclude_re = [
+  # Only returns freed heap pages to the OS (malloc_trim); no observable behaviour. Its effect is
+  # measured by scripts/rss_smoke.py.
+  "replace release_memory with \\(\\)",
+]

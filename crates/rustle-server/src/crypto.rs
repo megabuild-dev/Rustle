@@ -310,4 +310,51 @@ mod tests {
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
         );
     }
+
+    #[test]
+    fn debug_never_prints_the_key() {
+        let k = MasterKey::from_bytes([0xab; 32]);
+        let d = format!("{k:?}");
+        assert_eq!(d, "MasterKey(**redacted**)");
+        assert!(!d.contains("ab"));
+    }
+
+    #[test]
+    fn open_length_boundary() {
+        let k = MasterKey::from_bytes([1; 32]);
+        // 12-byte nonce + 16-byte tag is the smallest possible ciphertext (empty plaintext)
+        assert!(matches!(
+            k.open(&[0u8; 27], b""),
+            Err(CryptoError::Malformed)
+        ));
+        assert!(matches!(k.open(&[0u8; 28], b""), Err(CryptoError::Decrypt)));
+        let empty = k.seal(b"", b"aad");
+        assert_eq!(empty.len(), 28);
+        assert_eq!(k.open(&empty, b"aad").unwrap(), b"");
+    }
+
+    #[test]
+    fn secret_files_are_private_and_never_overwritten() {
+        use std::os::unix::fs::PermissionsExt;
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("secret");
+        write_secret_file(&p, b"hello").unwrap();
+        assert_eq!(std::fs::read(&p).unwrap(), b"hello");
+        assert_eq!(
+            std::fs::metadata(&p).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+        assert!(
+            write_secret_file(&p, b"other").is_err(),
+            "create_new: no overwrite"
+        );
+        assert_eq!(std::fs::read(&p).unwrap(), b"hello");
+    }
+
+    #[test]
+    fn password_hash_uses_the_documented_cost() {
+        let h = hash_password("pw");
+        assert!(h.starts_with("$argon2id$v=19$m=8192,t=3,p=1$"), "{h}");
+        assert!(verify_password("pw", &h) && !verify_password("pW", &h));
+    }
 }

@@ -393,4 +393,183 @@ mod tests {
         assert_eq!(hash, crypto::sha256_hex(raw.as_bytes()));
         assert_ne!(new_deploy_token().0, raw);
     }
+
+    #[test]
+    fn backoff_delays_are_exact() {
+        // 3 free attempts, then 2, 4, 8 ... seconds, capped at 900
+        let expected = [0, 0, 0, 2, 4, 8, 16, 32, 64, 128, 256, 512, 900, 900, 900];
+        let a = st();
+        for (i, want) in expected.iter().enumerate() {
+            let n = a.login_failed("ip", 1000);
+            assert_eq!(n as usize, i + 1, "failure counter");
+            assert_eq!(a.login_wait("ip", 1000), *want, "after failure {}", i + 1);
+        }
+        // the wait shrinks as time passes and never goes negative
+        assert_eq!(a.login_wait("ip", 1000 + 899), 1);
+        assert_eq!(a.login_wait("ip", 1000 + 900), 0);
+        assert_eq!(a.login_wait("ip", 5000), 0);
+    }
+
+    #[test]
+    fn full_backoff_table_evicts_the_entry_closest_to_expiry() {
+        let a = st();
+        for i in 0..1024 {
+            for _ in 0..5 {
+                a.login_failed(&format!("ip{i}"), 1000 + i); // all still penalized at t=1000
+            }
+        }
+        assert_eq!(a.backoff.lock().unwrap().len(), 1024);
+        a.login_failed("newcomer", 1000);
+        let m = a.backoff.lock().unwrap();
+        assert_eq!(m.len(), 1024, "bounded");
+        assert!(!m.contains_key("ip0"), "earliest expiry evicted");
+        assert!(m.contains_key("ip1") && m.contains_key("ip1023") && m.contains_key("newcomer"));
+        drop(m);
+        // a known address is never evicted to make room for itself
+        a.login_failed("ip1", 1000);
+        assert_eq!(a.backoff.lock().unwrap().len(), 1024);
+        // when everything has expired the table is purged first
+        a.login_failed("late", 100_000);
+        assert_eq!(a.backoff.lock().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn rate_limiter_boundaries_and_pruning() {
+        let r = RateLimiter::default();
+        assert!(r.allow("k", 1, 10, 100));
+        assert!(!r.allow("k", 1, 10, 109), "still inside the window");
+        assert!(
+            r.allow("k", 1, 10, 110),
+            "window is exactly `window` seconds"
+        );
+        assert!(!r.allow("k", 0, 10, 110), "limit 0 allows nothing");
+        // stale windows are dropped once the table is large
+        let r = RateLimiter::default();
+        for i in 0..513 {
+            r.allow(&format!("k{i}"), 5, 10, 0);
+        }
+        assert_eq!(r.map.lock().unwrap().len(), 513);
+        r.allow("fresh", 5, 10, 5); // 513 entries but nobody is stale yet at t=5
+        assert_eq!(r.map.lock().unwrap().len(), 514);
+        r.allow("later", 5, 10, 50); // every k* window ended
+        assert_eq!(
+            r.map.lock().unwrap().len(),
+            1,
+            "all stale windows pruned; only `later` remains"
+        );
+    }
+
+    #[test]
+    fn client_ip_length_and_emptiness_rules() {
+        let ip = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("x-forwarded-for", v.parse().unwrap());
+            client_ip(&h)
+        };
+        assert_eq!(ip(" "), "local");
+        assert_eq!(ip("1.1.1.1, "), "local", "empty last hop");
+        assert_eq!(ip(&"a".repeat(63)), "a".repeat(63));
+        assert_eq!(ip(&"a".repeat(64)), "local");
+        assert_eq!(ip("  7.7.7.7  "), "7.7.7.7");
+    }
+
+    #[tokio::test]
+    async fn deploy_token_header_rules() {
+        use crate::app::TestEnv;
+        let e = TestEnv::new();
+        let site = crate::sites::create_site(
+            &e.state,
+            rustle_types::CreateSiteReq {
+                name: "a".into(),
+                domain: "a.example.com".into(),
+                image_repo: "ghcr.io/o/a".into(),
+                ram_limit_mb: 128,
+                container_port: 3000,
+                registry_id: None,
+                env: vec![],
+                skip_dns_check: true,
+                override_budget: true,
+            },
+        )
+        .await
+        .unwrap();
+        let tok = crate::sites::create_token(&e.state, &site.id).unwrap();
+        let hdr = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("authorization", v.parse().unwrap());
+            h
+        };
+        assert!(deploy_token(&e.state, &hdr(&format!("Bearer {}", tok.token))).is_ok());
+        assert!(
+            deploy_token(&e.state, &hdr(&format!("Bearer  {} ", tok.token))).is_ok(),
+            "trimmed"
+        );
+        // right length, wrong prefix
+        assert!(deploy_token(&e.state, &hdr(&format!("Bearer xx_{}", &tok.token[3..]))).is_err());
+        // right prefix, absurd length
+        let long = format!("Bearer rt_{}", "a".repeat(200));
+        assert!(deploy_token(&e.state, &hdr(&long)).is_err());
+        assert!(deploy_token(&e.state, &hdr(&format!("Basic {}", tok.token))).is_err());
+        assert!(deploy_token(&e.state, &HeaderMap::new()).is_err());
+        // unknown token with the right shape
+        assert!(deploy_token(&e.state, &hdr("Bearer rt_unknown")).is_err());
+        // revoked tokens stop working
+        crate::sites::revoke_token(&e.state, &site.id, &tok.id).unwrap();
+        assert!(deploy_token(&e.state, &hdr(&format!("Bearer {}", tok.token))).is_err());
+    }
+
+    #[test]
+    fn session_claims_and_csrf_are_exact() {
+        assert_eq!(SESSION_SECS, 43_200);
+        let a = st();
+        let (t, csrf) = a.issue(7, 5000);
+        let c = a.verify(&t, 5000).unwrap();
+        assert_eq!(
+            (c.iat, c.exp, c.tv, c.sub.as_str()),
+            (5000, 5000 + 43_200, 7, "admin")
+        );
+        assert!(a.verify(&t, 5000 + 43_199).is_some() && a.verify(&t, 5000 + 43_200).is_none());
+        assert_eq!(csrf.len(), 64);
+        assert!(csrf.bytes().all(|b| b.is_ascii_hexdigit()));
+        assert_eq!(a.csrf_for(&c.sid), csrf, "deterministic per session");
+        assert_ne!(a.csrf_for("other-session"), csrf);
+        let (t2, csrf2) = a.issue(7, 5000);
+        assert_ne!(t, t2, "every login gets a fresh session id");
+        assert_ne!(csrf, csrf2);
+        let b = AuthState::new(&MasterKey::from_bytes([9; 32]));
+        assert_ne!(b.csrf_for(&c.sid), csrf, "key-dependent");
+    }
+
+    #[test]
+    fn verify_rejects_malformed_shapes() {
+        let a = st();
+        let (t, _) = a.issue(1, 100);
+        assert!(a.verify(&t, 101).is_some());
+        assert!(
+            a.verify(&format!("{t}.extra"), 101).is_none(),
+            "four segments"
+        );
+        let parts: Vec<&str> = t.split('.').collect();
+        assert!(
+            a.verify(&format!("{}.{}", parts[0], parts[1]), 101)
+                .is_none(),
+            "two segments"
+        );
+        let other_hdr = b64url(br#"{"alg":"HS256","typ":"JWS"}"#);
+        assert!(a
+            .verify(&format!("{other_hdr}.{}.{}", parts[1], parts[2]), 101)
+            .is_none());
+        // a validly signed token for a different subject is not an admin session
+        let claims = Claims {
+            sub: "user".into(),
+            iat: 1,
+            exp: 10_000,
+            tv: 1,
+            sid: "x".into(),
+        };
+        let payload = b64url(&serde_json::to_vec(&claims).unwrap());
+        let signing = format!("{HEADER_B64}.{payload}");
+        let sig = b64url(&hmac_sha256(&a.jwt_key, signing.as_bytes()));
+        assert!(a.verify(&format!("{signing}.{sig}"), 5).is_none());
+    }
 }

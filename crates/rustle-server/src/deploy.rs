@@ -619,6 +619,150 @@ mod tests {
             .unwrap_or_else(|| panic!("{needle} not in {calls:?}"))
     }
 
+    fn job_stub() -> Job {
+        Job {
+            deployment_id: "d".into(),
+            image_ref: "ghcr.io/o/a:1".into(),
+            digest_override: None,
+            env_override: None,
+        }
+    }
+
+    async fn last_deployment(e: &TestEnv, id: &str) -> crate::store::DeploymentRow {
+        e.state.store.get_deployment(id).unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn crashing_container_fails_fast_with_its_exit_code() {
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        let first = deploy(&e, &s, "v1").await;
+        e.runtime.crash_next_start(137);
+        let second = deploy(&e, &s, "v2").await;
+        let d = last_deployment(&e, &second.deployment_id).await;
+        assert_eq!(d.status, "failed");
+        let err = d.error.unwrap();
+        assert!(err.contains("container exited with code 137"), "{err}");
+        let site = e.state.store.get_site(&s.id).unwrap().unwrap();
+        assert_eq!(
+            site.current_deployment_id.as_deref(),
+            Some(first.deployment_id.as_str())
+        );
+        assert_eq!(site.status, "running");
+        assert_eq!(
+            e.runtime.containers().iter().filter(|c| c.running).count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn if_the_old_container_vanished_a_failed_deploy_leaves_the_site_failed() {
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        deploy(&e, &s, "v1").await;
+        // somebody removed the running container behind Rustle's back
+        for c in e.runtime.containers() {
+            Runtime::remove(&*e.runtime, &c.id, true).await.unwrap();
+        }
+        e.runtime.crash_next_start(1);
+        let second = deploy(&e, &s, "v2").await;
+        assert_eq!(
+            last_deployment(&e, &second.deployment_id).await.status,
+            "failed"
+        );
+        let site = e.state.store.get_site(&s.id).unwrap().unwrap();
+        assert_eq!(
+            site.status, "failed",
+            "there is no previous version left to serve"
+        );
+    }
+
+    #[tokio::test]
+    async fn start_first_failure_leaves_the_old_version_untouched() {
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        update_site(
+            &e.state,
+            &s.id,
+            UpdateSiteReq {
+                zero_downtime: Some(true),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        deploy(&e, &s, "v1").await;
+        e.runtime.fail_next_starts(1);
+        e.runtime.clear_calls();
+        let second = deploy(&e, &s, "v2").await;
+        assert_eq!(
+            last_deployment(&e, &second.deployment_id).await.status,
+            "failed"
+        );
+        let calls = e.runtime.calls();
+        assert!(
+            !calls.iter().any(|c| c.starts_with("stop")),
+            "old never stopped: {calls:?}"
+        );
+        assert_eq!(
+            e.state.store.get_site(&s.id).unwrap().unwrap().status,
+            "running"
+        );
+        assert_eq!(
+            e.runtime.containers().iter().filter(|c| c.running).count(),
+            1
+        );
+    }
+
+    #[tokio::test]
+    async fn previous_deployment_must_be_another_one_with_a_container() {
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        let acc = deploy(&e, &s, "v1").await;
+        let site_row = e.state.store.get_site(&s.id).unwrap().unwrap();
+        let cur = last_deployment(&e, &acc.deployment_id).await;
+        // the current deployment is not its own predecessor
+        assert!(previous_deployment(&e.state, &site_row, &cur).is_none());
+        // a different deployment object: the current one is the predecessor
+        let mut next = cur.clone();
+        next.id = "another".into();
+        assert_eq!(
+            previous_deployment(&e.state, &site_row, &next).unwrap().id,
+            cur.id
+        );
+        // ...unless it has no container any more
+        let mut gone = cur.clone();
+        gone.container_id = None;
+        e.state.store.update_deployment(&gone).unwrap();
+        assert!(previous_deployment(&e.state, &site_row, &next).is_none());
+    }
+
+    #[tokio::test]
+    async fn wait_all_idle_reports_whether_it_became_idle() {
+        let d = Deployer::default();
+        assert!(d.wait_all_idle(Duration::from_millis(10)).await);
+        assert!(matches!(d.submit("s", job_stub()), Submit::Run));
+        let t = std::time::Instant::now();
+        assert!(
+            !d.wait_all_idle(Duration::from_millis(120)).await,
+            "still busy at the deadline"
+        );
+        assert!(t.elapsed() >= Duration::from_millis(100));
+        assert!(d.is_busy("s") && d.any_busy());
+        assert!(d.next("s").is_none());
+        assert!(!d.is_busy("s") && !d.any_busy());
+        assert!(d.wait_all_idle(Duration::from_millis(10)).await);
+        // a job finishing while we wait is noticed
+        d.submit("s", job_stub());
+        let d = std::sync::Arc::new(d);
+        let d2 = d.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(80)).await;
+            d2.next("s");
+        });
+        assert!(d.wait_all_idle(Duration::from_secs(5)).await);
+    }
+
     #[tokio::test]
     async fn site_actions_start_stop_restart() {
         use crate::sites::{site_action, Action};
