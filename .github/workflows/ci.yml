@@ -102,3 +102,25 @@ jobs:
       - run: cargo build --release -p rustle-server
       - name: Run the real-stack scenario
         run: RUSTLE_BIN="$PWD/target/release/rustle" ./scripts/e2e-real.sh
+
+  shared-caddy:
+    name: Sharing an existing Caddy (real Caddy, fake Docker)
+    needs: [server, ui]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - uses: actions/download-artifact@v4
+        with:
+          name: ui-dist
+          path: ui-dist
+      - run: cargo build --release -p rustle-server --features dev-fakes
+      - name: Take the Caddy binary from the same image the target server uses
+        run: |
+          docker create --name c caddy:2-alpine
+          docker cp c:/usr/bin/caddy ./caddy
+          docker rm c
+      - run: CADDY_BIN="$PWD/caddy" ./scripts/e2e-shared-caddy.sh
+

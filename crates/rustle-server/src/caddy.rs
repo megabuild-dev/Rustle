@@ -55,7 +55,8 @@ fn common_handlers() -> [Value; 2] {
     [
         json!({
             "handler": "headers",
-            "response": { "set": {
+            // deferred: applied after the upstream answered, so `Server` set by the app is removed too
+            "response": { "deferred": true, "set": {
                 "Strict-Transport-Security": ["max-age=31536000"],
                 "X-Content-Type-Options": ["nosniff"],
                 "Referrer-Policy": ["strict-origin-when-cross-origin"],
@@ -542,6 +543,7 @@ mod tests {
             body["handle"][0]["response"]["set"]["Strict-Transport-Security"][0],
             "max-age=31536000"
         );
+        assert_eq!(body["handle"][0]["response"]["deferred"], true);
         assert_eq!(body["handle"][1]["handler"], "encode");
         assert_eq!(body["handle"][2]["@id"], "up-blog");
         assert_eq!(

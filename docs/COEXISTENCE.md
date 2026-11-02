@@ -39,7 +39,9 @@ Do this in a quiet moment: recreating the Caddy container interrupts every site 
 	...
 ```
 This moves the admin API from `localhost:2019` (inside the container) to a unix socket that only the `rustle` user and root can reach:
-the other containers cannot touch it.
+the other containers cannot touch it. The `|0666` part (socket permissions) needs a current Caddy such as `caddy:2-alpine`; the old 2.6.x
+that Ubuntu ships does not understand it and creates a socket literally named `admin.sock|0666`. Check the result with
+`ls -l /run/rustle` (expect `caddy-admin.sock`, mode `srw-rw-rw-`).
 
 **`compose.head.yml`**: two additions to the `caddy` service:
 ```yaml
@@ -133,4 +135,7 @@ IP. A `caddy reload` drops Rustle's routes just like above: they return within 1
   (`curl --unix-socket ... http://127.0.0.1/config/apps/http/servers` lists the names).
 * Nginx, Apache or Traefik on 80/443 are not supported as the shared proxy; use `--own-caddy` after freeing those ports.
 * Routes Rustle adds carry the same response headers and compression as a typical `(common)` snippet (HSTS, `nosniff`, referrer policy, no `Server` header, zstd/gzip).
-* Not yet verified against a real Caddyfile-built Caddy: see items 27-40 of [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
+* Verified with a real Caddy (`scripts/e2e-shared-caddy.sh`, a Caddyfile shaped like yours): routes inserted before the Caddyfile's own, the old site
+  untouched until the first deploy, `caddy reload` drops Rustle's routes and SIGHUP or the 15 s poll restores them, rollback by deleting the
+  site, headers and compression like `(common)`. Not verified: your actual compose/Docker networking, see items 33-42 of
+  [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
