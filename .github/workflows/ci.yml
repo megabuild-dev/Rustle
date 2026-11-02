@@ -23,6 +23,21 @@ jobs:
       - run: cargo clippy -p rustle-types -p rustle-server --all-targets -- -D warnings
       - run: cargo test -p rustle-types -p rustle-server
 
+  crap:
+    name: CRAP score gate (every function below 30)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+      - uses: Swatinem/rust-cache@v2
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-llvm-cov
+      - run: cargo install rust-code-analysis-cli --locked
+      - run: scripts/quality.sh crap
+
   ui:
     name: Dashboard (WebAssembly)
     runs-on: ubuntu-latest
