@@ -161,4 +161,41 @@ mod tests {
             assert!(!valid_domain(bad), "{bad}");
         }
     }
+
+    #[test]
+    fn civil_matches_a_day_by_day_calendar() {
+        let leap = |y: i64| (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+        let (mut y, mut m, mut d, mut wd) = (1970i64, 1u32, 1u32, 4u32);
+        for day in 0..=(230 * 366) {
+            let ts = day * 86_400;
+            assert_eq!(civil(ts), (y, m, d, 0, 0, wd), "day {day}");
+            assert_eq!(
+                civil(ts + 86_399),
+                (y, m, d, 23, 59, wd),
+                "end of day {day}"
+            );
+            // advance
+            let dim = match m {
+                2 if leap(y) => 29,
+                2 => 28,
+                4 | 6 | 9 | 11 => 30,
+                _ => 31,
+            };
+            wd = (wd + 1) % 7;
+            if d < dim {
+                d += 1;
+            } else {
+                d = 1;
+                if m == 12 {
+                    m = 1;
+                    y += 1;
+                } else {
+                    m += 1;
+                }
+            }
+        }
+        // before 1970 as well
+        assert_eq!(civil(-1), (1969, 12, 31, 23, 59, 3));
+        assert_eq!(stamp(1_793_540_290), "20261101-133810");
+    }
 }
