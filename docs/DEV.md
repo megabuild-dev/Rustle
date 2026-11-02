@@ -36,6 +36,8 @@ Use the same topology as production, never a mounted `docker.sock`:
 | `DOCKER_HOST` | `tcp://172.31.0.2:2375` | the socket proxy (also accepts `unix:///path`) |
 | `CADDY_ADMIN_URL` | `unix:///run/rustle/caddy-admin.sock` | Caddy Admin API |
 | `RUSTLE_ADMIN_UPSTREAM` | `unix//run/rustle/rustle.sock` | how Caddy dials Rustle (Caddy syntax) |
+| `RUSTLE_GATEWAY` | `managed` | `external` shares an existing Caddy (admin API default `http://127.0.0.1:2019`, dashboard upstream `127.0.0.1:3000`) |
+| `RUSTLE_CADDY_SERVER` | autodetect | Caddy HTTP server name to add routes to (external mode) |
 | `RUSTLE_NETWORK` | `rustle-net` | Docker network created by the installer |
 | `RUSTLE_PUBLIC_IP` / `RUSTLE_ADMIN_DOMAIN` / `RUSTLE_ACME_EMAIL` | none | read by `rustle init` |
 | `RUSTLE_CGROUP_ROOT`, `RUSTLE_PROC_ROOT` | `/sys/fs/cgroup`, `/proc` | overridable for tests |

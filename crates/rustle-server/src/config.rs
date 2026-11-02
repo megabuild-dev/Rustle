@@ -35,6 +35,12 @@ pub struct Config {
     pub master_key_file: PathBuf,
     pub docker: Endpoint,
     pub caddy_admin: Endpoint,
+    /// `true` when Rustle shares a Caddy that already exists on the host instead of running its own:
+    /// it then only adds/removes its own `@id` routes, never loads a whole configuration, and
+    /// reaches containers by IP (the host cannot resolve Docker names).
+    pub gateway_external: bool,
+    /// Name of Caddy's HTTP server to add routes to (autodetected in external mode).
+    pub caddy_server: Option<String>,
     /// Upstream string Caddy uses to reach Rustle (`unix//run/rustle/rustle.sock` or `host:port`).
     pub admin_upstream: String,
     pub public_ip: Option<String>,
@@ -63,10 +69,13 @@ impl Config {
             Some(s) => Some(s),
             None => Some("127.0.0.1:3000".into()),
         };
-        let admin_upstream = get("RUSTLE_ADMIN_UPSTREAM").unwrap_or_else(|| match &unix_socket {
-            Some(p) => format!("unix/{}", p.display()),
-            None => "127.0.0.1:3000".into(),
-        });
+        let gateway_external = get("RUSTLE_GATEWAY").is_some_and(|v| v == "external");
+        let admin_upstream = get("RUSTLE_ADMIN_UPSTREAM")
+            .or_else(|| gateway_external.then(|| "127.0.0.1:3000".to_string()))
+            .unwrap_or_else(|| match &unix_socket {
+                Some(p) => format!("unix/{}", p.display()),
+                None => "127.0.0.1:3000".into(),
+            });
         Config {
             local_bind,
             unix_socket,
@@ -79,10 +88,15 @@ impl Config {
             docker: Endpoint::parse(
                 &get("DOCKER_HOST").unwrap_or_else(|| "tcp://172.31.0.2:2375".into()),
             ),
-            caddy_admin: Endpoint::parse(
-                &get("CADDY_ADMIN_URL")
-                    .unwrap_or_else(|| "unix:///run/rustle/caddy-admin.sock".into()),
-            ),
+            caddy_admin: Endpoint::parse(&get("CADDY_ADMIN_URL").unwrap_or_else(|| {
+                if gateway_external {
+                    "http://127.0.0.1:2019".into() // Caddy's default admin address
+                } else {
+                    "unix:///run/rustle/caddy-admin.sock".into()
+                }
+            })),
+            gateway_external,
+            caddy_server: get("RUSTLE_CADDY_SERVER"),
             admin_upstream,
             public_ip: get("RUSTLE_PUBLIC_IP"),
             network: get("RUSTLE_NETWORK").unwrap_or_else(|| "rustle-net".into()),
@@ -113,6 +127,8 @@ impl Config {
             master_key_file: dir.join("master.key"),
             docker: Endpoint::Tcp("127.0.0.1:1".into()),
             caddy_admin: Endpoint::Tcp("127.0.0.1:1".into()),
+            gateway_external: false,
+            caddy_server: None,
             admin_upstream: "127.0.0.1:3000".into(),
             public_ip: None,
             network: "rustle-net".into(),

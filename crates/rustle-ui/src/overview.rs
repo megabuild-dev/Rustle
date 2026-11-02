@@ -31,6 +31,9 @@ pub fn Overview() -> impl IntoView {
     });
 
     view! {
+        <Show when=move || stats.get().is_some_and(|s| s.gateway_external && !s.admin_domain_set)>
+            <div class="banner warn">"Rustle is sharing your existing Caddy. Set a dashboard domain in Settings to open this dashboard through it; until then use the SSH tunnel."</div>
+        </Show>
         <Show when=move || stats.get().is_some_and(|s| s.public_ip_mode)>
             <div class="banner warn">"The dashboard uses a self-signed certificate on the server IP. Set a domain in Settings to get a trusted HTTPS address."</div>
         </Show>

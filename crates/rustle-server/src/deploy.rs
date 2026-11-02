@@ -6,7 +6,7 @@ use crate::docker::{ContainerSpec, RtError};
 use crate::error::{AppError, AppResult};
 use crate::imageref::ImageRef;
 use crate::metrics;
-use crate::sites::{self, dial, effective_env, load_env, registry_auth};
+use crate::sites::{self, effective_env, load_env, registry_auth, upstream};
 use crate::store::{DeploymentRow, SiteRow};
 use crate::util::{now, rand_hex};
 use rustle_types::{DeployAccepted, EnvVar};
@@ -364,6 +364,7 @@ async fn run_deploy(
 
     // Health: the container must stay up and answer on its port.
     let mut healthy = false;
+    let mut live_ip: Option<String> = None;
     let mut why = String::from("no response before the deadline");
     for _ in 0..state.tuning.health_attempts {
         match rt.inspect(&id).await {
@@ -383,6 +384,7 @@ async fn run_deploy(
                 if let Some(ip) = info.ip {
                     if state.health.probe(&ip, site.container_port).await {
                         healthy = true;
+                        live_ip = Some(ip);
                         break;
                     }
                 }
@@ -409,7 +411,11 @@ async fn run_deploy(
     // Switch traffic.
     if let Err(e) = state
         .gateway
-        .upsert_site(&site.name, &site.domain, &dial(&name, site.container_port))
+        .upsert_site(
+            &site.name,
+            &site.domain,
+            &upstream(state, &name, live_ip.as_deref(), site.container_port),
+        )
         .await
     {
         let _ = rt.remove(&id, true).await;
@@ -600,6 +606,25 @@ mod tests {
         assert!(
             pos(&calls, "pull") < pos(&calls, "create")
                 && pos(&calls, "create") < pos(&calls, "start")
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_caddy_gets_no_route_until_the_first_deploy_then_the_container_ip() {
+        let e = TestEnv::external();
+        let s = site(&e, "blog", 256).await;
+        assert!(
+            e.gateway.sites().is_empty(),
+            "creating a site must not touch traffic that an existing site may already be serving"
+        );
+        deploy(&e, &s, "v1").await;
+        let (domain, dial) = e.gateway.sites()["blog"].clone();
+        assert_eq!(domain, "blog.example.com");
+        let ip = e.runtime.containers()[0].ip.clone();
+        assert_eq!(
+            dial,
+            format!("{ip}:3000"),
+            "a host Caddy cannot resolve container names"
         );
     }
 

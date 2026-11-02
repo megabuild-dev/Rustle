@@ -202,6 +202,15 @@ pub fn dial(container_name: &str, port: u16) -> String {
     format!("{container_name}:{port}")
 }
 
+/// How Caddy reaches a container. Rustle's own Caddy lives on `rustle-net` and resolves container
+/// names; a Caddy running on the host cannot, so it is given the container's IP.
+pub fn upstream(state: &AppState, container_name: &str, ip: Option<&str>, port: u16) -> String {
+    match (state.cfg.gateway_external, ip) {
+        (true, Some(ip)) => format!("{ip}:{port}"),
+        _ => dial(container_name, port),
+    }
+}
+
 /// Placeholder upstream used before the first deployment (Caddy answers 502).
 pub fn placeholder_dial(name: &str, port: u16) -> String {
     dial(&format!("rustle-{name}-pending"), port)
@@ -261,19 +270,24 @@ pub async fn create_site(state: &AppState, req: CreateSiteReq) -> AppResult<Site
         let _ = state.store.delete_site(&row.id);
         return Err(e);
     }
-    if let Err(e) = state
-        .gateway
-        .upsert_site(
-            &row.name,
-            &row.domain,
-            &placeholder_dial(&row.name, row.container_port),
-        )
-        .await
-    {
-        let _ = state.store.delete_site(&row.id);
-        return Err(AppError::unavailable(format!(
-            "could not configure the gateway: {e}"
-        )));
+    // With a shared Caddy the domain may already be served by an existing site: adding a placeholder
+    // route now would take that traffic over and answer 502. The route is added by the first
+    // successful deploy instead, which switches traffic in one step.
+    if !state.cfg.gateway_external {
+        if let Err(e) = state
+            .gateway
+            .upsert_site(
+                &row.name,
+                &row.domain,
+                &placeholder_dial(&row.name, row.container_port),
+            )
+            .await
+        {
+            let _ = state.store.delete_site(&row.id);
+            return Err(AppError::unavailable(format!(
+                "could not configure the gateway: {e}"
+            )));
+        }
     }
     state.store.audit(t, "admin", "site.create", &row.name);
     Ok(site_dto(state, &row))

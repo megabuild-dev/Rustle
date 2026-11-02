@@ -301,7 +301,9 @@ pub fn collect_stats(s: &AppState) -> SystemStats {
     st.runtime_ok = degraded.as_deref().is_none_or(|d| !d.contains("runtime"));
     st.gateway_ok = degraded.as_deref().is_none_or(|d| !d.contains("gateway"));
     st.degraded_reason = degraded;
-    st.public_ip_mode = sites::admin_domain(s).is_none();
+    st.gateway_external = s.cfg.gateway_external;
+    st.admin_domain_set = sites::admin_domain(s).is_some();
+    st.public_ip_mode = sites::admin_domain(s).is_none() && !s.cfg.gateway_external;
     st
 }
 

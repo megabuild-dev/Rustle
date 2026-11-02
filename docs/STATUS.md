@@ -32,6 +32,7 @@ in the build sandbox; it is listed in [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
 | FR-24 | Optional zero-downtime deploys | done, default off; needs a load test on a 1 GB VPS |
 | FR-25 | `NODE_OPTIONS` auto-tuning | done |
 | FR-26 | Dockerfile template | done |
+| NFR | Coexist with an existing Caddy (`--use-existing-caddy`) | done in code and unit tests (gateway, deploy, reconcile); unverified against a real Caddyfile-built Caddy |
 | FR-27 | Sleep idle sites | **not implemented** (planned P3, "Could") |
 
 ## Measured

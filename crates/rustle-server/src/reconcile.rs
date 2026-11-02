@@ -3,7 +3,7 @@
 
 use crate::app::AppState;
 use crate::caddy::BaseParams;
-use crate::sites::{admin_domain, dial, placeholder_dial, public_ip};
+use crate::sites::{admin_domain, placeholder_dial, public_ip, upstream};
 use std::collections::HashSet;
 
 pub fn base_params(state: &AppState) -> BaseParams {
@@ -65,18 +65,55 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
         Ok(v) => v.into_iter().collect(),
         Err(e) => return Some(format!("gateway unreachable: {e}")),
     };
+    let external = state.cfg.gateway_external;
     for s in &sites {
         let id = format!("site-{}", s.name);
-        if !full && present.contains(&id) {
+        // Managed Caddy: only repair what is missing. Shared Caddy: container IPs can change after a
+        // Docker restart or reboot, so the upstream is re-checked on every pass.
+        if !full && !external && present.contains(&id) {
             continue;
         }
-        let upstream = s
+        let dep = s
             .current_deployment_id
             .as_deref()
-            .and_then(|d| state.store.get_deployment(d).ok().flatten())
-            .and_then(|d| d.container_name)
-            .map(|n| dial(&n, s.container_port))
-            .unwrap_or_else(|| placeholder_dial(&s.name, s.container_port));
+            .and_then(|d| state.store.get_deployment(d).ok().flatten());
+        let upstream = match dep
+            .as_ref()
+            .and_then(|d| d.container_name.clone().zip(d.container_id.clone()))
+        {
+            Some((cname, cid)) => {
+                let ip = if external {
+                    match state.runtime.inspect(&cid).await {
+                        Ok(info) if info.running => info.ip,
+                        _ => None,
+                    }
+                } else {
+                    None
+                };
+                if external && ip.is_none() {
+                    continue; // not running: leave whatever route exists untouched
+                }
+                upstream(state, &cname, ip.as_deref(), s.container_port)
+            }
+            // Nothing deployed yet: a shared Caddy keeps serving the domain as it did before.
+            None if external => continue,
+            None => placeholder_dial(&s.name, s.container_port),
+        };
+        if external && present.contains(&id) && !full {
+            // Cheap path: only touch Caddy when the upstream actually differs.
+            if state
+                .gateway
+                .set_upstream(&s.name, &upstream)
+                .await
+                .is_err()
+            {
+                let _ = state
+                    .gateway
+                    .upsert_site(&s.name, &s.domain, &upstream)
+                    .await;
+            }
+            continue;
+        }
         if let Err(e) = state
             .gateway
             .upsert_site(&s.name, &s.domain, &upstream)
@@ -236,6 +273,33 @@ mod tests {
             "route points at the live container again"
         );
         assert!(e.gateway.base().is_some());
+    }
+
+    #[tokio::test]
+    async fn shared_caddy_routes_follow_container_ip_changes_and_skip_undeployed_sites() {
+        let e = TestEnv::external();
+        let live = mk(&e, "blog").await;
+        let _idle = mk(&e, "idle").await;
+        webhook(&e.state, &live, "ghcr.io/o/blog:1").unwrap();
+        e.state.deployer.wait_idle(&live.id).await;
+        let cid = e.runtime.containers()[0].id.clone();
+        let ip = e.runtime.containers()[0].ip.clone();
+        assert_eq!(e.gateway.sites()["blog"].1, format!("{ip}:3000"));
+        // Docker restarted and handed out a different address: the next pass repairs the upstream
+        e.runtime.set_ip(&cid, "10.9.9.9");
+        assert!(sync(&e.state, false).await.is_none());
+        assert_eq!(e.gateway.sites()["blog"].1, "10.9.9.9:3000");
+        // a site that was never deployed keeps whatever the existing Caddy does for its domain
+        assert!(!e.gateway.sites().contains_key("idle"));
+        // the existing Caddy reloaded its Caddyfile and lost our routes: they come back
+        e.gateway.wipe();
+        assert!(sync(&e.state, false).await.is_none());
+        assert_eq!(e.gateway.sites()["blog"].1, "10.9.9.9:3000");
+        // ...and a stopped container is not pointed at
+        e.runtime.stop(&cid, 1).await.unwrap();
+        e.gateway.wipe();
+        sync(&e.state, false).await;
+        assert!(e.gateway.sites().is_empty());
     }
 
     #[tokio::test]

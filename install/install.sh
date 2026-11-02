@@ -2,6 +2,11 @@
 # Rustle installer: idempotent, safe to re-run. Ubuntu 22.04/24.04, x86_64 or aarch64, run as root.
 #
 #   sudo ./install.sh [--domain admin.example.com] [--email you@example.com] [--slim] [--dry-run]
+#                     [--use-existing-caddy [--caddy-admin http://127.0.0.1:2019]] [--own-caddy]
+#
+# A Caddy already running on this server is detected: the installer stops and asks you to choose
+#   --use-existing-caddy  share it (Rustle only adds its own routes; your sites keep working untouched)
+#   --own-caddy           run Rustle's Caddy on 80/443 (free those ports first; you must move your sites)
 #
 # Environment overrides:
 #   RUSTLE_VERSION       release tag to install (default: latest)
@@ -23,6 +28,8 @@ DOMAIN="${RUSTLE_ADMIN_DOMAIN:-}"
 EMAIL="${RUSTLE_ACME_EMAIL:-}"
 DRY="${RUSTLE_INSTALL_DRY_RUN:-0}"
 SLIM=0
+CADDY_MODE=""
+CADDY_ADMIN="${RUSTLE_CADDY_ADMIN:-http://127.0.0.1:2019}"
 SRC_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 while [ $# -gt 0 ]; do
@@ -30,8 +37,11 @@ while [ $# -gt 0 ]; do
     --domain) DOMAIN="${2:?--domain needs a value}"; shift 2 ;;
     --email) EMAIL="${2:?--email needs a value}"; shift 2 ;;
     --slim) SLIM=1; shift ;;
+    --use-existing-caddy) CADDY_MODE=external; shift ;;
+    --own-caddy) CADDY_MODE=managed; shift ;;
+    --caddy-admin) CADDY_ADMIN="${2:?--caddy-admin needs a URL}"; shift 2 ;;
     --dry-run) DRY=1; shift ;;
-    -h|--help) sed -n '2,15p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
 done
@@ -76,6 +86,46 @@ if [ "$(stat -fc %T /sys/fs/cgroup 2>/dev/null || true)" != "cgroup2fs" ]; then
   if [ "$DRY" = 1 ]; then echo "warning: $msg"; else die "$msg"; fi
 fi
 
+# ---- 0b. is there already a Caddy (or another web server) on this machine? ---------------------
+EXISTING=""
+if systemctl is-active --quiet caddy 2>/dev/null; then
+  EXISTING="the 'caddy' system service"
+elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -i caddy | grep -qv '^rustle-caddy '; then
+  EXISTING="a Caddy container"
+elif ss -ltn 2>/dev/null | grep -Eq ':(80|443)[[:space:]]' && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx rustle-caddy; then
+  EXISTING="another program listening on port 80/443"
+fi
+if [ -n "$EXISTING" ] && [ -z "$CADDY_MODE" ]; then
+  cat >&2 <<MSG
+
+Found $EXISTING.
+
+Rustle needs a Caddy to route traffic. Choose how, then re-run (nothing has been changed yet):
+
+  --use-existing-caddy   Share your Caddy. Your current sites keep working exactly as they are; Rustle only adds
+                         and removes the routes of the sites it manages. Needs Caddy's admin API
+                         (default http://127.0.0.1:2019, override with --caddy-admin).
+  --own-caddy            Run Rustle's own Caddy on ports 80/443. Only possible once those ports are free,
+                         and your existing sites must be moved into Rustle first.
+
+See docs/COEXISTENCE.md.
+MSG
+  [ "$DRY" = 1 ] || exit 3
+fi
+if [ "$CADDY_MODE" = external ]; then
+  case "$EXISTING" in
+    *"listening on port"*) die "--use-existing-caddy needs Caddy; the program on 80/443 is something else" ;;
+  esac
+  if [ "$DRY" = 1 ]; then
+    echo "+ check that Caddy's admin API answers at $CADDY_ADMIN"
+  else
+    curl -fsS --max-time 3 "$CADDY_ADMIN/config/" >/dev/null 2>&1 || die "Caddy's admin API does not answer at $CADDY_ADMIN.
+  apt-installed Caddy enables it on 127.0.0.1:2019 by default (check that your Caddyfile has no 'admin off').
+  For a Caddy container, publish that port on the host loopback (-p 127.0.0.1:2019:2019) and set 'admin 0.0.0.0:2019' in its global options.
+  Use --caddy-admin to point Rustle somewhere else."
+  fi
+fi
+
 # ---- 1. swap ----------------------------------------------------------------------------------
 log "Swap"
 if [ "$(swapon --show --noheadings 2>/dev/null | wc -l)" -gt 0 ]; then
@@ -99,7 +149,11 @@ if ! command -v docker >/dev/null 2>&1; then
   run apt-get update -qq
   run env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq docker.io curl ca-certificates
 fi
-if [ -f /etc/docker/daemon.json ] && [ "$DRY" != 1 ]; then
+if command -v docker >/dev/null 2>&1 && [ -n "$(docker ps -q 2>/dev/null)" ] && [ ! -f /etc/docker/daemon.json ] && [ "$DRY" != 1 ]; then
+  # Applying daemon.json needs a Docker restart, which would interrupt the containers already running here.
+  echo "Docker is running other containers: leaving /etc/docker/daemon.json alone (no restart)."
+  echo "  Recommended (apply during a quiet moment): $(tr -d '\n ' < "$SRC_DIR/../deploy/daemon.json" 2>/dev/null)"
+elif [ -f /etc/docker/daemon.json ] && [ "$DRY" != 1 ]; then
   if ! cmp -s <(asset daemon.json) /etc/docker/daemon.json; then
     echo "warning: /etc/docker/daemon.json already exists and differs; not touching it."
     echo "         Rustle recommends: native.cgroupdriver=systemd, userland-proxy=false, live-restore=true, log limits."
@@ -190,7 +244,9 @@ docker network inspect rustle-net >/dev/null 2>&1 || run docker network create -
 # The Docker API proxy lives on its OWN bridge with a fixed address and publishes nothing: tenant
 # containers (on rustle-net) cannot route to it, and it is not reachable from other machines.
 docker network inspect rustle-docker >/dev/null 2>&1 || run docker network create --subnet 172.31.0.0/29 rustle-docker
-if [ "$DRY" = 1 ]; then
+if [ "$CADDY_MODE" = external ]; then
+  echo "sharing the existing Caddy at $CADDY_ADMIN: not starting a Caddy container"
+elif [ "$DRY" = 1 ]; then
   echo "+ $BIN caddy-config > /etc/rustle/caddy.json"
 else
   "$BIN" caddy-config > /etc/rustle/caddy.json.tmp && mv -f /etc/rustle/caddy.json.tmp /etc/rustle/caddy.json
@@ -210,26 +266,37 @@ recreate rustle-docker-proxy \
   -v /var/run/docker.sock:/var/run/docker.sock:ro --memory 32m \
   "$PROXY_IMAGE"
 # Caddy: public 80/443, Admin API on a unix socket in /run/rustle (never on rustle-net).
-recreate rustle-caddy \
-  --network rustle-net -p 80:80 -p 443:443 --memory 96m --oom-score-adj -500 \
-  -v /run/rustle:/run/rustle -v /etc/rustle/caddy.json:/etc/caddy/caddy.json:ro \
-  -v rustle_caddy_data:/data -v rustle_caddy_config:/config \
-  "$CADDY_IMAGE" caddy run --config /etc/caddy/caddy.json --resume
+if [ "$CADDY_MODE" != external ]; then
+  recreate rustle-caddy \
+    --network rustle-net -p 80:80 -p 443:443 --memory 96m --oom-score-adj -500 \
+    -v /run/rustle:/run/rustle -v /etc/rustle/caddy.json:/etc/caddy/caddy.json:ro \
+    -v rustle_caddy_data:/data -v rustle_caddy_config:/config \
+    "$CADDY_IMAGE" caddy run --config /etc/caddy/caddy.json --resume
+fi
 
 # ---- 7. systemd service -----------------------------------------------------------------------
 log "systemd service"
 asset prestart.sh | write_file /usr/lib/rustle/prestart.sh 0755
 asset rustle.service | write_file /etc/systemd/system/rustle.service 0644
-[ -f /etc/rustle/rustle.env ] || write_file /etc/rustle/rustle.env 0640 <<'CONF'
+if [ "$CADDY_MODE" = external ]; then
+  write_file /etc/rustle/rustle.env 0640 <<CONF
+# Written by install.sh (shared-Caddy mode); re-running the installer rewrites it. No secrets here.
+RUSTLE_GATEWAY=external
+CADDY_ADMIN_URL=$CADDY_ADMIN
+RUSTLE_ADMIN_UPSTREAM=127.0.0.1:3000
+CONF
+else
+  [ -f /etc/rustle/rustle.env ] || write_file /etc/rustle/rustle.env 0640 <<'CONF'
 # Extra environment for Rustle (RUST_LOG=debug, RUSTLE_BIND=127.0.0.1:3000, ...). No secrets here.
 CONF
+fi
 [ "$DRY" = 1 ] || chown root:rustle /etc/rustle/rustle.env
 run systemctl daemon-reload
 run systemctl enable rustle
 run systemctl restart rustle
 
 # ---- 8. firewall (only if ufw is already active) ----------------------------------------------
-if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
+if [ "$CADDY_MODE" != external ] && command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q 'Status: active'; then
   log "Firewall"
   run ufw allow 22/tcp
   run ufw allow 80/tcp
@@ -249,6 +316,30 @@ log "Waiting for the dashboard"
 if [ "$DRY" != 1 ]; then
   for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1 && break; sleep 1; done
   curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1 || { journalctl -u rustle -n 30 --no-pager; die "Rustle did not come up"; }
+fi
+if [ "$CADDY_MODE" = external ]; then
+  if [ -n "$DOMAIN" ]; then
+    cat <<MSG
+
+Rustle is running next to your existing Caddy.
+
+  Dashboard: https://$DOMAIN   (the domain's A record must point to this server; Caddy issues the certificate)
+  Your existing sites are untouched. Rustle adds a route for a site only after that site's first successful deploy.
+  Until the dashboard answers on its domain, use the SSH tunnel:  ssh -L 3000:127.0.0.1:3000 you@server  ->  http://localhost:3000
+
+MSG
+  else
+    cat <<MSG
+
+Rustle is running next to your existing Caddy.
+
+  The dashboard is NOT exposed yet (a catch-all route would hijack your other sites).
+  Open it through an SSH tunnel:  ssh -L 3000:127.0.0.1:3000 you@server  ->  http://localhost:3000
+  then set a dashboard domain under Settings (point its A record here first). Your existing sites are untouched.
+
+MSG
+  fi
+  exit 0
 fi
 if [ -n "$DOMAIN" ]; then URL="https://$DOMAIN"; else URL="https://${PUBLIC_IP:-<server-ip>}"; fi
 cat <<MSG

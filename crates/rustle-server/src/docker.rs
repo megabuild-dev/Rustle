@@ -687,6 +687,12 @@ impl FakeRuntime {
         );
         id
     }
+    /// Simulate Docker handing a container a different address (restart, reboot).
+    pub fn set_ip(&self, id: &str, ip: &str) {
+        if let Some(c) = self.st.lock().unwrap().containers.get_mut(id) {
+            c.ip = ip.into();
+        }
+    }
     pub fn image_ids(&self) -> Vec<String> {
         self.st.lock().unwrap().images.keys().cloned().collect()
     }

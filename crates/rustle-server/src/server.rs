@@ -30,7 +30,11 @@ pub fn build_state(cfg: Config, key: MasterKey, store: Store) -> Arc<AppState> {
         Target::from(&cfg.docker),
         cfg.network.clone(),
     ));
-    let gateway: Arc<dyn Gateway> = Arc::new(HttpGateway::new(Target::from(&cfg.caddy_admin)));
+    let gateway: Arc<dyn Gateway> = Arc::new(HttpGateway::with_options(
+        Target::from(&cfg.caddy_admin),
+        cfg.gateway_external,
+        cfg.caddy_server.clone(),
+    ));
     let github: Arc<dyn Github> = Arc::new(HttpGithub::new(cfg.github_api.clone()));
     AppState::new(cfg, store, key, runtime, gateway, github)
 }

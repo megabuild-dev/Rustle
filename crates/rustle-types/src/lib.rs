@@ -51,6 +51,11 @@ pub struct SystemStats {
     pub allocated_mb: u64,
     pub budget_mb: u64,
     pub public_ip_mode: bool,
+    /// Rustle shares a Caddy it did not create; the dashboard needs a domain to be exposed through it.
+    #[serde(default)]
+    pub gateway_external: bool,
+    #[serde(default)]
+    pub admin_domain_set: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

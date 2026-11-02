@@ -27,4 +27,5 @@ Made during implementation after review by an independent senior reviewer; each 
 | Logout | clears the cookie | also revokes the token (token version bump) | A stolen token must die with the session |
 | Cookie | `rustle_session` | `__Host-rustle_session` | A sibling subdomain (a tenant) must not be able to plant the cookie |
 | Job and log sizes | 64 KB per run | 16 KB per run; container logs read at most 256 KiB, `tail` at most 500 lines; image pull progress is streamed, never buffered | RAM and database growth (every backup carries the logs) |
+| Shared Caddy | not covered (Rustle always ran its own Caddy) | `RUSTLE_GATEWAY=external` (installer: `--use-existing-caddy`): route-by-`@id` only, never a whole-config load, server autodetected, containers reached by IP re-checked every minute, no route before the first deploy, dashboard exposed only with a domain | Servers that already run sites behind a Caddy (docs/COEXISTENCE.md) |
 

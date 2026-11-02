@@ -32,4 +32,10 @@ through the rest on a fresh Ubuntu 24.04 VPS (1 vCPU / 1 GB).
 | 24 | The host can reach the proxy at `172.31.0.2:2375` (own bridge, nothing published) and tenants cannot | e2e "isolation" checks | Fall back to publishing on loopback plus an `iptables -t raw` DROP for non-loopback sources |
 | 25 | The Docker proxy tag `tecnativa/docker-socket-proxy:0.3.0` exists and `POST=1` also permits `DELETE` | `docker pull`, then a delete through the proxy | Pin the correct tag, or use `wollomatic/socket-proxy` |
 | 26 | Updating: tag `v0.0.1` then `v0.0.2`; break `v0.0.2` on purpose; the previous binary comes back after 4 failed starts and only while `bin/update-pending` exists | `ls /var/lib/rustle/bin`, `journalctl -t rustle` | n/a |
+| 27 | Shared Caddy: `curl localhost:2019/config/apps/http/servers` on a Caddyfile-built Caddy shows one server (`srv0`) listening on :443 and Rustle picks it | install with `--use-existing-caddy`, then `journalctl -u rustle` | Set `RUSTLE_CADDY_SERVER` |
+| 28 | A route inserted at index 0 with `@id` and a host matcher takes precedence over the Caddyfile's own route for the same host, and removing it restores the old one | create a site for a domain the old Caddyfile serves, deploy, then delete the site | Inspect the route order in `/config/apps/http/servers/<srv>/routes` |
+| 29 | New hostnames added through the API get certificates from a Caddyfile-built Caddy | add a site on a new domain | Check `apps.tls.automation` in the running config |
+| 30 | `caddy reload` drops Rustle's routes and Rustle restores them (within 60 s, immediately after `systemctl restart rustle`) | reload while a site is live | n/a |
+| 31 | Container IP changes after `docker restart` / reboot are picked up; the old address never serves another site | reboot with 3 sites, compare each domain's content | Pin per-site container addresses |
+| 32 | Installing next to a Docker that runs other containers does not restart Docker | `docker ps` uptime before/after | n/a |
 

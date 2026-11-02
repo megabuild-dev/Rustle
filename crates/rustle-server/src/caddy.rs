@@ -113,11 +113,25 @@ pub trait Gateway: Send + Sync {
 
 pub struct HttpGateway {
     target: Target,
+    /// Sharing a Caddy that Rustle did not create (see `Config::gateway_external`).
+    external: bool,
+    configured_server: Option<String>,
+    resolved_server: std::sync::Mutex<Option<String>>,
 }
 
 impl HttpGateway {
+    /// A Caddy that Rustle owns: its server is called `main` and it may load the base config.
     pub fn new(target: Target) -> Self {
-        Self { target }
+        Self::with_options(target, false, None)
+    }
+
+    pub fn with_options(target: Target, external: bool, server: Option<String>) -> Self {
+        Self {
+            target,
+            external,
+            configured_server: server,
+            resolved_server: std::sync::Mutex::new(None),
+        }
     }
 
     async fn call(&self, req: Req) -> GwResult<httpc::Resp> {
@@ -148,9 +162,63 @@ impl HttpGateway {
             _ => Err(GwError::Rejected(format!("{}: {}", r.status, r.text()))),
         }
     }
-}
 
-const ROUTES: &str = "/config/apps/http/servers/main/routes";
+    /// The HTTP server routes are added to. A Caddyfile-built config names it `srv0` (or similar),
+    /// so in external mode it is found by looking for the server that listens on :443.
+    async fn server(&self) -> GwResult<String> {
+        if let Some(s) = &self.configured_server {
+            return Ok(s.clone());
+        }
+        if !self.external {
+            return Ok("main".into());
+        }
+        if let Some(s) = self
+            .resolved_server
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .clone()
+        {
+            return Ok(s);
+        }
+        let r = self.call(Req::get("/config/apps/http/servers")).await?;
+        Self::check(&r)?;
+        let v: Value = r.json().map_err(|e| GwError::Rejected(e.to_string()))?;
+        let servers = v
+            .as_object()
+            .ok_or_else(|| GwError::Rejected("Caddy has no HTTP servers configured".into()))?;
+        let tls: Vec<&String> = servers
+            .iter()
+            .filter(|(_, s)| {
+                s["listen"].as_array().is_some_and(|l| {
+                    l.iter()
+                        .any(|a| a.as_str().is_some_and(|a| a.ends_with(":443")))
+                })
+            })
+            .map(|(k, _)| k)
+            .collect();
+        let chosen = match (tls.as_slice(), servers.len()) {
+            ([one], _) => (*one).clone(),
+            ([], 1) => servers.keys().next().cloned().unwrap_or_default(),
+            _ => {
+                return Err(GwError::Rejected(
+                    "cannot tell which Caddy server to use; set RUSTLE_CADDY_SERVER".into(),
+                ))
+            }
+        };
+        *self
+            .resolved_server
+            .lock()
+            .unwrap_or_else(|p| p.into_inner()) = Some(chosen.clone());
+        Ok(chosen)
+    }
+
+    async fn routes(&self) -> GwResult<String> {
+        Ok(format!(
+            "/config/apps/http/servers/{}/routes",
+            self.server().await?
+        ))
+    }
+}
 
 #[async_trait]
 impl Gateway for HttpGateway {
@@ -160,24 +228,45 @@ impl Gateway for HttpGateway {
     }
 
     async fn ensure_base(&self, p: &BaseParams) -> GwResult<()> {
+        let server = self.server().await?;
         let r = self
-            .call(Req::get("/config/apps/http/servers/main"))
+            .call(Req::get(format!("/config/apps/http/servers/{server}")))
             .await?;
         let have_server = r.ok() && r.text().trim() != "null";
         if !have_server {
+            if self.external {
+                // Never replace somebody else's configuration.
+                return Err(GwError::Rejected(format!(
+                    "Caddy has no HTTP server named '{server}'; Rustle will not load a configuration into a Caddy it does not own"
+                )));
+            }
             tracing::warn!("caddy has no main server; loading base config");
             let r = self.call(Req::post("/load").json(&base_config(p))).await?;
             return Self::check(&r);
         }
+        // In external mode a catch-all admin route would swallow every other site: the dashboard is
+        // only exposed through Caddy once it has a domain.
+        if self.external && p.admin_domain.is_none() {
+            return Ok(());
+        }
         if !self.exists("admin").await? {
-            // Admin route must stay LAST so site routes (inserted at index 0) match first.
-            let r = self.call(Req::post(ROUTES).json(&admin_route(p))).await?;
+            // Appended last so site routes (inserted at index 0) match first.
+            let routes = self.routes().await?;
+            let r = self.call(Req::post(routes).json(&admin_route(p))).await?;
             return Self::check(&r);
         }
         Ok(())
     }
 
     async fn set_admin(&self, p: &BaseParams) -> GwResult<()> {
+        if self.external && p.admin_domain.is_none() {
+            return self.remove_by_id("admin").await;
+        }
+        if self.external && !self.exists("admin").await? {
+            let routes = self.routes().await?;
+            let r = self.call(Req::post(routes).json(&admin_route(p))).await?;
+            return Self::check(&r);
+        }
         let r = self
             .call(Req::new(hyper::Method::PATCH, "/id/admin").json(&admin_route(p)))
             .await?;
@@ -191,8 +280,10 @@ impl Gateway for HttpGateway {
             self.call(Req::new(hyper::Method::PATCH, format!("/id/{id}")).json(&route))
                 .await?
         } else {
-            // PUT on an array index inserts, putting the route before the catch-all admin route.
-            self.call(Req::new(hyper::Method::PUT, format!("{ROUTES}/0")).json(&route))
+            // PUT on an array index inserts, putting the route before every other route (including
+            // a catch-all admin route, and any route of a Caddyfile that already serves the domain).
+            let routes = self.routes().await?;
+            self.call(Req::new(hyper::Method::PUT, format!("{routes}/0")).json(&route))
                 .await?
         };
         Self::check(&r)
@@ -209,19 +300,12 @@ impl Gateway for HttpGateway {
     }
 
     async fn remove_site(&self, name: &str) -> GwResult<()> {
-        let r = self
-            .call(Req::new(hyper::Method::DELETE, format!("/id/site-{name}")))
-            .await?;
-        if r.ok() || r.status == 404 || (r.status == 500 && r.text().contains("unknown object ID"))
-        {
-            Ok(())
-        } else {
-            Self::check(&r)
-        }
+        self.remove_by_id(&format!("site-{name}")).await
     }
 
     async fn site_ids(&self) -> GwResult<Vec<String>> {
-        let r = self.call(Req::get(ROUTES)).await?;
+        let routes = self.routes().await?;
+        let r = self.call(Req::get(routes)).await?;
         Self::check(&r)?;
         let v: Value = r.json().map_err(|e| GwError::Rejected(e.to_string()))?;
         Ok(v.as_array()
@@ -233,6 +317,20 @@ impl Gateway for HttpGateway {
                     .collect()
             })
             .unwrap_or_default())
+    }
+}
+
+impl HttpGateway {
+    async fn remove_by_id(&self, id: &str) -> GwResult<()> {
+        let r = self
+            .call(Req::new(hyper::Method::DELETE, format!("/id/{id}")))
+            .await?;
+        if r.ok() || r.status == 404 || (r.status == 500 && r.text().contains("unknown object ID"))
+        {
+            Ok(())
+        } else {
+            Self::check(&r)
+        }
     }
 }
 
@@ -513,6 +611,134 @@ mod tests {
             post.path, "/config/apps/http/servers/main/routes",
             "POST appends => admin stays last"
         );
+    }
+
+    // ---- sharing an existing Caddy -------------------------------------------------------------
+
+    fn external_mock(
+        servers: &str,
+        main_exists: bool,
+    ) -> impl Fn(&crate::testutil::Recorded) -> (u16, Vec<(String, String)>, String) {
+        let servers = servers.to_string();
+        move |r| match (r.method.as_str(), r.path.as_str()) {
+            ("GET", "/config/apps/http/servers") => (200, vec![], servers.clone()),
+            ("GET", p)
+                if p.starts_with("/config/apps/http/servers/srv") && !p.ends_with("/routes") =>
+            {
+                (
+                    200,
+                    vec![],
+                    if main_exists {
+                        "{\"listen\":[\":443\"]}".into()
+                    } else {
+                        "null".into()
+                    },
+                )
+            }
+            ("GET", "/id/admin") => (404, vec![], "{}".into()),
+            ("GET", "/id/site-blog") => (404, vec![], "{}".into()),
+            _ => (200, vec![], "{}".into()),
+        }
+    }
+
+    #[tokio::test]
+    async fn external_mode_autodetects_the_caddyfile_server_and_uses_it() {
+        let m = MockHttp::start(external_mock(
+            "{\"srv0\":{\"listen\":[\":443\"]},\"srv1\":{\"listen\":[\":8080\"]}}",
+            true,
+        ))
+        .await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        gw.upsert_site("blog", "blog.example.com", "172.30.0.9:3000")
+            .await
+            .unwrap();
+        let put = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PUT")
+            .unwrap();
+        assert_eq!(
+            put.path, "/config/apps/http/servers/srv0/routes/0",
+            "inserted first so it wins over the existing site's route"
+        );
+        // routes of the existing sites (no @id of ours) are never listed as ours
+        let m2 = MockHttp::start(|r| {
+            if r.path.ends_with("/routes") {
+                (
+                    200,
+                    vec![],
+                    json!([{"match":[{"host":["old.example.com"]}]},{"@id":"site-a"}]).to_string(),
+                )
+            } else {
+                (200, vec![], "{\"srv0\":{\"listen\":[\":443\"]}}".into())
+            }
+        })
+        .await;
+        let gw = HttpGateway::with_options(Target::Tcp(m2.addr.clone()), true, None);
+        assert_eq!(gw.site_ids().await.unwrap(), vec!["site-a".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn external_mode_never_loads_a_whole_configuration() {
+        let m = MockHttp::start(external_mock("{\"srv0\":{\"listen\":[\":443\"]}}", false)).await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        let err = gw
+            .ensure_base(&params(Some("admin.example.com")))
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("will not load"), "{err}");
+        assert!(
+            !m.requests().iter().any(|r| r.path == "/load"),
+            "an existing Caddy must never be overwritten"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_mode_exposes_the_dashboard_only_with_a_domain() {
+        let m = MockHttp::start(external_mock("{\"srv0\":{\"listen\":[\":443\"]}}", true)).await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        // no domain: a catch-all route would hijack every other site, so nothing is added
+        gw.ensure_base(&params(None)).await.unwrap();
+        assert!(!m.requests().iter().any(|r| r.method == "POST"));
+        // with a domain: a host-matched admin route is appended
+        gw.ensure_base(&params(Some("admin.example.com")))
+            .await
+            .unwrap();
+        let post = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "POST")
+            .unwrap();
+        assert_eq!(post.path, "/config/apps/http/servers/srv0/routes");
+        assert_eq!(post.json()["match"][0]["host"][0], "admin.example.com");
+        assert_eq!(
+            post.json()["handle"][0]["upstreams"][0]["dial"],
+            "unix//run/rustle/rustle.sock"
+        );
+    }
+
+    #[tokio::test]
+    async fn external_mode_is_explicit_when_it_cannot_choose_a_server() {
+        let m = MockHttp::start(external_mock(
+            "{\"a\":{\"listen\":[\":443\"]},\"b\":{\"listen\":[\":443\"]}}",
+            true,
+        ))
+        .await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        assert!(gw
+            .upsert_site("blog", "blog.example.com", "1.2.3.4:1")
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("RUSTLE_CADDY_SERVER"));
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, Some("b".into()));
+        gw.upsert_site("blog", "blog.example.com", "1.2.3.4:1")
+            .await
+            .unwrap();
+        assert!(m
+            .requests()
+            .iter()
+            .any(|r| r.path == "/config/apps/http/servers/b/routes/0"));
     }
 
     #[tokio::test]

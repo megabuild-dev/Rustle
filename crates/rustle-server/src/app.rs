@@ -232,10 +232,20 @@ impl TestEnv {
         Self::build(false)
     }
 
+    /// Rustle sharing a Caddy that already exists on the host.
+    pub fn external() -> TestEnv {
+        Self::build_with(false, true)
+    }
+
     pub fn build(file_db: bool) -> TestEnv {
+        Self::build_with(file_db, false)
+    }
+
+    fn build_with(file_db: bool, external: bool) -> TestEnv {
         use crate::docker::FakeRuntime;
         let dir = tempfile::tempdir().unwrap();
-        let cfg = Config::for_tests(dir.path());
+        let mut cfg = Config::for_tests(dir.path());
+        cfg.gateway_external = external;
         let cfg_db = cfg.db_path.clone();
         let runtime = Arc::new(FakeRuntime::new());
         let gateway = Arc::new(crate::caddy::FakeGateway::new());
