@@ -1105,6 +1105,241 @@ mod tests {
         rt.remove("abc123", true).await.unwrap();
     }
 
+    fn frame(stream: u8, text: &str) -> String {
+        let mut v = vec![stream, 0, 0, 0];
+        v.extend_from_slice(&(text.len() as u32).to_be_bytes());
+        let mut s = String::from_utf8(v).unwrap();
+        s.push_str(text);
+        s
+    }
+
+    #[tokio::test]
+    async fn list_calls_parse_and_filter() {
+        let m = MockHttp::start(|r| {
+            if r.path.starts_with("/containers/json") {
+                (200, vec![], json!([
+                    {"Id":"c1","Names":["/rustle-a"],"ImageID":"sha256:i","State":"running","Labels":{"rustle.managed":"1","n":5}},
+                    {"Id":"c2"}
+                ]).to_string())
+            } else if r.path == "/images/json" {
+                (200, vec![], json!([
+                    {"Id":"sha256:a","RepoDigests":["x@sha256:1","y@sha256:2"],"Size":123},
+                    {"Id":"sha256:b"}
+                ]).to_string())
+            } else {
+                (500, vec![], "{\"message\":\"boom\"}".into())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let all = rt.list_containers(None).await.unwrap();
+        assert_eq!(all.len(), 2);
+        assert_eq!(all[0].name, "rustle-a");
+        assert_eq!(
+            (all[0].id.as_str(), all[0].state.as_str()),
+            ("c1", "running")
+        );
+        assert_eq!(all[0].image_id, "sha256:i");
+        assert_eq!(all[0].labels.len(), 1, "non-string labels are dropped");
+        assert_eq!(all[0].labels["rustle.managed"], "1");
+        assert_eq!((all[1].name.as_str(), all[1].state.as_str()), ("", ""));
+        let reqs = m.requests();
+        assert_eq!(reqs[0].path, "/containers/json?all=1");
+        rt.list_containers(Some("rustle.managed=1")).await.unwrap();
+        let p = m.requests()[1].path.clone();
+        assert!(p.starts_with("/containers/json?all=1&filters="), "{p}");
+        assert!(p.contains("rustle.managed%3D1"), "{p}");
+
+        let imgs = rt.list_images().await.unwrap();
+        assert_eq!(imgs.len(), 2);
+        assert_eq!(imgs[0].repo_digests, vec!["x@sha256:1", "y@sha256:2"]);
+        assert_eq!((imgs[0].size, imgs[1].size), (123, 0));
+        assert!(imgs[1].repo_digests.is_empty());
+
+        let bad = MockHttp::start(|_| (500, vec![], "{\"message\":\"boom\"}".into())).await;
+        let rt = HttpRuntime::new(Target::Tcp(bad.addr.clone()), "rustle-net".into());
+        assert!(rt.list_containers(None).await.is_err());
+        assert!(rt.list_images().await.is_err());
+        assert!(rt.logs("c", 10).await.is_err());
+        assert!(rt.inspect("c").await.is_err());
+        assert!(rt.resolve_digest("i", "r").await.is_err());
+        assert!(rt.create(&spec(false, true)).await.is_err());
+        assert!(rt.remove_image("i").await.is_err());
+        assert!(rt.remove("c", false).await.is_err());
+        assert!(rt.ping().await.is_err());
+        assert!(rt.wait("c", Duration::from_secs(2)).await.is_err());
+        assert!(rt.stop("c", 1).await.is_err());
+        assert!(rt.kill("c").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn logs_wait_ping_and_misc() {
+        let m = MockHttp::start(|r| {
+            if r.path == "/_ping" {
+                (200, vec![], "OK".into())
+            } else if r.path.starts_with("/containers/c1/logs") {
+                (
+                    200,
+                    vec![],
+                    format!("{}{}", frame(1, "out\n"), frame(2, "err\n")),
+                )
+            } else if r.path.starts_with("/containers/c1/wait") {
+                (200, vec![], "{\"StatusCode\":3}".into())
+            } else if r.path.starts_with("/containers/slow/wait") {
+                std::thread::sleep(Duration::from_millis(600));
+                (200, vec![], "{\"StatusCode\":0}".into())
+            } else if r.path.starts_with("/images/create") {
+                (
+                    200,
+                    vec![],
+                    "{\"status\":\"a\"}\n{\"status\":\"b\"}\n{\"status\":\"done\"}".into(),
+                )
+            } else if r.path.starts_with("/images/") && r.path.ends_with("/json") {
+                (
+                    200,
+                    vec![],
+                    json!({"Id":"sha256:only","RepoDigests":[]}).to_string(),
+                )
+            } else if r.path.starts_with("/containers/create") {
+                (201, vec![], "{}".into())
+            } else if r.path.starts_with("/containers/c1/json") {
+                (200, vec![], json!({"State":{}}).to_string())
+            } else if r.method == "DELETE" {
+                (204, vec![], String::new())
+            } else {
+                (404, vec![], "{\"message\":\"nope\"}".into())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        rt.ping().await.unwrap();
+        assert_eq!(rt.logs("c1", 10_000).await.unwrap(), "out\nerr\n");
+        assert!(
+            m.requests().last().unwrap().path.ends_with("tail=500"),
+            "tail is capped"
+        );
+        assert_eq!(
+            rt.wait("c1", Duration::from_secs(2)).await.unwrap(),
+            Some(3)
+        );
+        assert_eq!(
+            rt.wait("slow", Duration::from_millis(100)).await.unwrap(),
+            None,
+            "timeout is not an error"
+        );
+        assert!(matches!(
+            rt.wait("gone", Duration::from_secs(2)).await,
+            Err(RtError::NotFound)
+        ));
+        // progress without a trailing newline is still checked
+        rt.pull("ghcr.io/o/a:v1", None).await.unwrap();
+        assert!(m
+            .requests()
+            .last()
+            .unwrap()
+            .header("x-registry-auth")
+            .is_none());
+        // no RepoDigests: fall back to the image id
+        assert_eq!(
+            rt.resolve_digest("i", "ghcr.io/o/a").await.unwrap(),
+            "sha256:only"
+        );
+        // create without an id
+        let e = rt.create(&spec(false, true)).await.unwrap_err();
+        assert!(e.to_string().contains("no id"), "{e}");
+        // inspect with an empty State
+        let i = rt.inspect("c1").await.unwrap();
+        assert!(!i.running && i.ip.is_none() && i.labels.is_empty() && i.exit_code == 0);
+        rt.remove_image("sha256:x").await.unwrap();
+        rt.remove("c1", true).await.unwrap();
+        assert!(m.requests().last().unwrap().path.contains("force=true"));
+        // invalid image refs never reach the daemon
+        assert!(rt.pull("bad image", None).await.is_err());
+        // unreachable daemon
+        let dead = HttpRuntime::new(Target::Tcp("127.0.0.1:1".into()), "rustle-net".into());
+        assert!(matches!(
+            dead.wait("c", Duration::from_secs(1)).await,
+            Err(RtError::Unavailable(_))
+        ));
+        assert!(matches!(
+            dead.pull("ghcr.io/o/a:v1", None).await,
+            Err(RtError::Unavailable(_))
+        ));
+        assert!(matches!(
+            dead.logs("c", 1).await,
+            Err(RtError::Unavailable(_))
+        ));
+        assert!(matches!(
+            dead.logs_follow("c", 1).await,
+            Err(RtError::Unavailable(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn pull_http_errors_and_truncated_log_marker() {
+        let m = MockHttp::start(|r| {
+            if r.path.contains("fromImage=ghcr.io%2Fo%2Fmissing") {
+                (404, vec![], "{\"message\":\"manifest unknown\"}".into())
+            } else if r.path.starts_with("/containers/big/logs") {
+                (200, vec![], frame(1, &"x".repeat(262_144)))
+            } else {
+                (200, vec![], String::new())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let e = rt.pull("ghcr.io/o/missing:v1", None).await.unwrap_err();
+        assert!(
+            e.to_string().contains("manifest unknown") || matches!(e, RtError::NotFound),
+            "{e}"
+        );
+        let text = rt.logs("big", 100).await.unwrap();
+        assert!(text.ends_with("[rustle] output truncated\n"));
+        assert!(text.len() < 300 * 1024);
+    }
+
+    #[tokio::test]
+    async fn follow_streams_complete_frames_and_stops() {
+        let m = MockHttp::start(|r| {
+            if r.path.starts_with("/containers/c1/logs") {
+                (
+                    200,
+                    vec![],
+                    format!("{}{}", frame(1, "one\n"), frame(2, "two\n")),
+                )
+            } else if r.path.starts_with("/containers/boom/logs") {
+                (500, vec![], "x".into())
+            } else {
+                (404, vec![], "{\"message\":\"no\"}".into())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let mut rx = rt.logs_follow("c1", 5).await.unwrap();
+        let mut got = String::new();
+        while let Some(t) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+            .await
+            .unwrap()
+        {
+            got.push_str(&t);
+        }
+        assert_eq!(got, "one\ntwo\n");
+        assert!(
+            m.requests()[0].path.contains("follow=1") && m.requests()[0].path.contains("tail=5")
+        );
+        assert!(matches!(
+            rt.logs_follow("nope", 1).await,
+            Err(RtError::NotFound)
+        ));
+        assert!(matches!(
+            rt.logs_follow("boom", 1).await,
+            Err(RtError::Other(_))
+        ));
+        // dropping the receiver stops the pump task
+        let rx = rt.logs_follow("c1", 5).await.unwrap();
+        drop(rx);
+    }
+
     #[tokio::test]
     async fn proxy_denial_is_reported_clearly() {
         let m = MockHttp::start(|_| (403, vec![], "Forbidden".into())).await;

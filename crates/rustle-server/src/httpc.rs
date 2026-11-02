@@ -214,19 +214,23 @@ pub async fn send_stream(target: &Target, r: &Req) -> Result<Response<Incoming>,
                 .map_err(|e| HttpError::Connect(format!("{}: {e}", p.display())))?;
             handshake(s, req).await
         }
-        Target::Tls(host, port) => {
-            let s = tokio::net::TcpStream::connect((host.as_str(), *port))
-                .await
-                .map_err(|e| HttpError::Connect(format!("{host}:{port}: {e}")))?;
-            let name = rustls::pki_types::ServerName::try_from(host.clone())
-                .map_err(|e| HttpError::Connect(e.to_string()))?;
-            let tls = tokio_rustls::TlsConnector::from(tls_config())
-                .connect(name, s)
-                .await
-                .map_err(|e| HttpError::Connect(format!("tls: {e}")))?;
-            handshake(tls, req).await
-        }
+        Target::Tls(host, port) => handshake(connect_tls(host, *port).await?, req).await,
     }
+}
+
+async fn connect_tls(
+    host: &str,
+    port: u16,
+) -> Result<tokio_rustls::client::TlsStream<tokio::net::TcpStream>, HttpError> {
+    let name = rustls::pki_types::ServerName::try_from(host.to_string())
+        .map_err(|e| HttpError::Connect(e.to_string()))?;
+    let s = tokio::net::TcpStream::connect((host, port))
+        .await
+        .map_err(|e| HttpError::Connect(format!("{host}:{port}: {e}")))?;
+    tokio_rustls::TlsConnector::from(tls_config())
+        .connect(name, s)
+        .await
+        .map_err(|e| HttpError::Connect(format!("tls: {e}")))
 }
 
 /// Send a request and buffer the whole response (capped at 8 MiB).
@@ -306,6 +310,48 @@ pub async fn send_capped(
 mod tests {
     use super::*;
     use crate::testutil::MockHttp;
+
+    #[tokio::test]
+    async fn connect_failures_are_typed_for_every_transport() {
+        let r = Req::get("/x");
+        let e = send_stream(&Target::Tcp("127.0.0.1:1".into()), &r)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(e, HttpError::Connect(m) if m.contains("127.0.0.1:1")));
+        let e = send_stream(&Target::Unix("/nonexistent/s.sock".into()), &r)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(e, HttpError::Connect(m) if m.contains("/nonexistent/s.sock")));
+        let e = send_stream(&Target::Tls("127.0.0.1".into(), 1), &r)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(e, HttpError::Connect(_)), "{e:?}");
+        let e = send_stream(&Target::Tls("not a host name".into(), 443), &r)
+            .await
+            .err()
+            .unwrap();
+        assert!(matches!(e, HttpError::Connect(_)), "{e:?}");
+        // a TCP server that is not TLS: the handshake fails cleanly
+        let l = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = l.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            if let Ok((mut s, _)) = l.accept().await {
+                use tokio::io::AsyncWriteExt;
+                let _ = s.write_all(b"HTTP/1.1 200 OK\r\n\r\n").await;
+            }
+        });
+        let e = send_stream(&Target::Tls("localhost".into(), port), &r)
+            .await
+            .err()
+            .unwrap();
+        assert!(
+            matches!(&e, HttpError::Connect(m) if m.starts_with("tls")),
+            "{e:?}"
+        );
+    }
 
     #[tokio::test]
     async fn tcp_roundtrip_and_headers() {

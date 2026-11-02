@@ -60,6 +60,6 @@ rows.sort(reverse=True)
 print(f"{'CRAP':>7} {'CC':>4} {'cov':>5}  function")
 for crap, cc, c, path, name, ln in rows[:TOP]:
     print(f"{crap:7.1f} {cc:4.0f} {c*100:4.0f}%  {path}:{ln} {name}")
-bad = [r for r in rows if r[0] > MAX]
-print(f"\n{len(rows)} functions, {len(bad)} above CRAP {MAX:g}; mean {sum(r[0] for r in rows)/max(len(rows),1):.2f}")
+bad = [r for r in rows if r[0] >= MAX]
+print(f"\n{len(rows)} functions, {len(bad)} at or above CRAP {MAX:g}; mean {sum(r[0] for r in rows)/max(len(rows),1):.2f}")
 sys.exit(1 if bad else 0)

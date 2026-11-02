@@ -27,73 +27,104 @@ pub fn random_password(len: usize) -> String {
 /// Idempotent first-run setup: master key, admin account, baseline RAM measurement, system jobs.
 pub fn init(cfg: &Config, reset_password: bool) -> Result<InitResult, String> {
     let existed = cfg.master_key_file.exists();
-    if !existed && cfg.db_path.exists() {
-        let has_data = Store::open(&cfg.db_path)
-            .map_err(|e| e.message)?
-            .admin()
-            .map_err(|e| e.message)?
-            .is_some();
-        if has_data {
-            return Err(format!(
-                "{} exists but the master key {} does not. A new key would make every stored secret unreadable. \
-                 Restore the original key file (hex, mode 0600) and run again.",
-                cfg.db_path.display(),
-                cfg.master_key_file.display()
-            ));
-        }
+    if !existed {
+        refuse_orphaned_database(cfg)?;
     }
     let key =
         MasterKey::load(&cfg.master_key_file, true).map_err(|e| format!("master key: {e}"))?;
     let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
-    match store.setting("key_check").map_err(|e| e.message)? {
-        Some(c) if c != key.check_value() => {
-            return Err("the master key does not match this database".into())
-        }
-        Some(_) => {}
-        None => store
-            .set_setting("key_check", &key.check_value())
-            .map_err(|e| e.message)?,
-    }
-    let mut password = None;
-    if store.admin().map_err(|e| e.message)?.is_none() || reset_password {
-        let pw = random_password(24);
-        let hash = crypto::hash_password(&pw);
-        if store.admin().map_err(|e| e.message)?.is_none() {
-            store.create_admin("admin", &hash).map_err(|e| e.message)?;
-        } else {
-            store.set_admin_password(&hash).map_err(|e| e.message)?;
-        }
-        password = Some(pw);
-    }
-    // Baseline RAM in use before any site runs: the budget is derived from it.
-    if store
-        .setting("base_used_mb")
-        .map_err(|e| e.message)?
-        .is_none()
-    {
-        let m = metrics::meminfo(&cfg.proc_root);
-        if m.total_kb > 0 {
-            let used = (m.total_kb.saturating_sub(m.available_kb) / 1024).max(1);
-            store
-                .set_setting("base_used_mb", &used.to_string())
-                .map_err(|e| e.message)?;
-        }
-    }
-    for (env, key) in [
-        ("RUSTLE_PUBLIC_IP", "public_ip"),
-        ("RUSTLE_ADMIN_DOMAIN", "admin_domain"),
-        ("RUSTLE_ACME_EMAIL", "acme_email"),
-    ] {
-        if let Some(v) = std::env::var(env).ok().filter(|v| !v.trim().is_empty()) {
-            store.set_setting(key, v.trim()).map_err(|e| e.message)?;
-        }
-    }
+    record_key_check(&store, &key)?;
+    let password = ensure_admin(&store, reset_password)?;
+    record_baseline(&store, cfg)?;
+    apply_env_settings(&store, |k| std::env::var(k).ok())?;
     crate::jobs::seed_system_jobs(&store).map_err(|e| e.message)?;
     Ok(InitResult {
         key_created: !existed,
         key_hex: key.to_hex(),
         password,
     })
+}
+
+/// A database with an admin but no key file: generating a new key would orphan every secret in it.
+fn refuse_orphaned_database(cfg: &Config) -> Result<(), String> {
+    if !cfg.db_path.exists() {
+        return Ok(());
+    }
+    let has_data = Store::open(&cfg.db_path)
+        .map_err(|e| e.message)?
+        .admin()
+        .map_err(|e| e.message)?
+        .is_some();
+    if has_data {
+        return Err(format!(
+            "{} exists but the master key {} does not. A new key would make every stored secret unreadable. \
+             Restore the original key file (hex, mode 0600) and run again.",
+            cfg.db_path.display(),
+            cfg.master_key_file.display()
+        ));
+    }
+    Ok(())
+}
+
+fn record_key_check(store: &Store, key: &MasterKey) -> Result<(), String> {
+    match store.setting("key_check").map_err(|e| e.message)? {
+        Some(c) if c != key.check_value() => {
+            Err("the master key does not match this database".into())
+        }
+        Some(_) => Ok(()),
+        None => store
+            .set_setting("key_check", &key.check_value())
+            .map_err(|e| e.message),
+    }
+}
+
+/// Create the admin account, or reset its password on request. Returns the new password, if any.
+fn ensure_admin(store: &Store, reset_password: bool) -> Result<Option<String>, String> {
+    let exists = store.admin().map_err(|e| e.message)?.is_some();
+    if exists && !reset_password {
+        return Ok(None);
+    }
+    let pw = random_password(24);
+    let hash = crypto::hash_password(&pw);
+    if exists {
+        store.set_admin_password(&hash).map_err(|e| e.message)?;
+    } else {
+        store.create_admin("admin", &hash).map_err(|e| e.message)?;
+    }
+    Ok(Some(pw))
+}
+
+/// Baseline RAM in use before any site runs: the budget is derived from it.
+fn record_baseline(store: &Store, cfg: &Config) -> Result<(), String> {
+    if store
+        .setting("base_used_mb")
+        .map_err(|e| e.message)?
+        .is_some()
+    {
+        return Ok(());
+    }
+    let m = metrics::meminfo(&cfg.proc_root);
+    if m.total_kb == 0 {
+        return Ok(());
+    }
+    let used = (m.total_kb.saturating_sub(m.available_kb) / 1024).max(1);
+    store
+        .set_setting("base_used_mb", &used.to_string())
+        .map_err(|e| e.message)
+}
+
+/// Seed settings the installer passes through the environment.
+fn apply_env_settings(store: &Store, get: impl Fn(&str) -> Option<String>) -> Result<(), String> {
+    for (env, key) in [
+        ("RUSTLE_PUBLIC_IP", "public_ip"),
+        ("RUSTLE_ADMIN_DOMAIN", "admin_domain"),
+        ("RUSTLE_ACME_EMAIL", "acme_email"),
+    ] {
+        if let Some(v) = get(env).filter(|v| !v.trim().is_empty()) {
+            store.set_setting(key, v.trim()).map_err(|e| e.message)?;
+        }
+    }
+    Ok(())
 }
 
 pub fn restore(cfg: &Config, file: &std::path::Path, force: bool) -> Result<(), String> {
@@ -182,6 +213,160 @@ pub fn parse_env_file(text: &str) -> Vec<rustle_types::EnvVar> {
     out
 }
 
+/// What one `site-ctl` site becomes in Rustle.
+struct SitePlan {
+    name: String,
+    domain: String,
+    repo: String,
+    ram: u32,
+    vars: Vec<rustle_types::EnvVar>,
+    crons: Vec<(String, String)>,
+    notes: Vec<String>,
+}
+
+/// `Err(reason)` means the site is skipped.
+fn plan_site(dir: &std::path::Path, name: &str, meta: &str, yml: &str) -> Result<SitePlan, String> {
+    use crate::util::{valid_domain, valid_site_name};
+    let image = yml
+        .lines()
+        .find_map(|l| l.trim().strip_prefix("image:"))
+        .map(|v| v.trim().to_string())
+        .unwrap_or_default();
+    let domain = meta_value(meta, "DOMAIN")
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    let mem: u32 = meta_value(meta, "MEM")
+        .and_then(|m| m.parse().ok())
+        .unwrap_or(256);
+    if !valid_site_name(name) {
+        return Err("the name is not valid in Rustle (letters, digits and dashes, no leading or trailing dash)".into());
+    }
+    if !valid_domain(&domain) {
+        return Err(format!("invalid domain '{domain}'"));
+    }
+    let repo = ghcr_repo(&image)?;
+    let mut notes = Vec::new();
+    let ram = mem.div_ceil(32).saturating_mul(32).clamp(64, 512);
+    if ram != mem {
+        notes.push(format!(
+            "RAM {mem} MB becomes {ram} MB (Rustle uses steps of 32, 64 to 512)"
+        ));
+    }
+    let read = |sub: &str, ext: &str| {
+        std::fs::read_to_string(dir.join(sub).join(format!("{name}.{ext}"))).unwrap_or_default()
+    };
+    let vars = parse_env_file(&read("env", "env"));
+    let crons = parse_cron_lines(&read("cron.d", "cron"), &mut notes);
+    unsupported_warnings(meta, &mut notes);
+    if !crons.is_empty() && !vars.iter().any(|v| v.key == "CRON_SECRET") {
+        notes.push("WARNING: the site has cron jobs but no CRON_SECRET in its env file; they will be called without a bearer token".into());
+    }
+    notes.push(format!(
+        "{domain}  {repo}  {ram} MB  {} env vars  {} cron jobs",
+        vars.len(),
+        crons.len()
+    ));
+    Ok(SitePlan {
+        name: name.to_string(),
+        domain,
+        repo,
+        ram,
+        vars,
+        crons,
+        notes,
+    })
+}
+
+fn ghcr_repo(image: &str) -> Result<String, String> {
+    match crate::imageref::ImageRef::parse(image) {
+        Ok(r) if r.is_ghcr() => Ok(r.repo_key()),
+        Ok(r) => Err(format!(
+            "image '{image}' is on {}; only ghcr.io images are supported",
+            r.host
+        )),
+        Err(e) => Err(format!("cannot read the image ('{image}'): {e}")),
+    }
+}
+
+fn unsupported_warnings(meta: &str, notes: &mut Vec<String>) {
+    if meta_value(meta, "WWW").is_some_and(|w| w != "0") {
+        notes.push(
+            "WARNING: the www redirect is not supported by Rustle yet; keep it in your Caddyfile"
+                .into(),
+        );
+    }
+    if meta_value(meta, "CACHE").is_some_and(|c| c == "1") {
+        notes.push("WARNING: the persistent .next/cache volume is not supported (Rustle runs stateless containers); the cache is rebuilt after each deploy".into());
+    }
+    if meta_value(meta, "HEALTH").is_some_and(|h| h != "/") {
+        notes.push("WARNING: Rustle checks health on '/', not on your custom path".into());
+    }
+}
+
+/// `<schedule>\t<path>` lines of a site's cron file.
+fn parse_cron_lines(text: &str, notes: &mut Vec<String>) -> Vec<(String, String)> {
+    let mut crons = Vec::new();
+    for l in text.lines().filter(|l| !l.trim().is_empty()) {
+        match l.split_once('\t') {
+            Some((s, p))
+                if crate::cron::CronExpr::parse(s).is_ok()
+                    && crate::jobs::validate_http_path(p.trim()).is_ok() =>
+            {
+                crons.push((s.trim().to_string(), p.trim().to_string()))
+            }
+            _ => notes.push(format!("WARNING: ignored an unreadable cron line: {l}")),
+        }
+    }
+    crons
+}
+
+fn persist_site(store: &Store, key: &MasterKey, plan: &SitePlan) -> Result<(), String> {
+    use crate::store::{CronRow, SiteRow};
+    use crate::util::{now, rand_hex};
+    let t = now();
+    let row = SiteRow {
+        id: rand_hex(6),
+        name: plan.name.clone(),
+        domain: plan.domain.clone(),
+        image_repo: plan.repo.clone(),
+        container_port: 3000,
+        ram_limit_mb: plan.ram,
+        status: "created".into(),
+        current_deployment_id: None,
+        registry_id: None,
+        zero_downtime: false,
+        compat_caps: false,
+        created_at: t,
+        updated_at: t,
+    };
+    store.insert_site(&row).map_err(|e| {
+        format!(
+            "could not create it ({}): it may already exist in Rustle",
+            e.message
+        )
+    })?;
+    store
+        .replace_env(&row.id, &crate::sites::seal_env(key, &row.id, &plan.vars))
+        .map_err(|e| e.message)?;
+    for (i, (sched, path)) in plan.crons.iter().enumerate() {
+        store
+            .insert_cron(&CronRow {
+                id: rand_hex(6),
+                kind: "http".into(),
+                name: format!("{} cron {}", plan.name, i + 1),
+                schedule: sched.clone(),
+                site_id: Some(row.id.clone()),
+                argv_json: Some(serde_json::to_string(&[path]).map_err(|e| e.to_string())?),
+                enabled: true,
+                system_key: None,
+                last_fired_minute: None,
+            })
+            .map_err(|e| e.message)?;
+    }
+    store.audit(t, "cli", "site.import", &plan.name);
+    Ok(())
+}
+
 /// Import the sites of a `site-ctl.sh` directory (`sites.d/*.meta`, `sites.d/*.yml`, `env/*.env`,
 /// `cron.d/*.cron`) into Rustle. Sites are created without touching traffic; each one goes live on its
 /// first deploy. Run it after `rustle init`, as the user that owns the database.
@@ -190,8 +375,6 @@ pub fn import_site_ctl(
     dir: &std::path::Path,
     dry_run: bool,
 ) -> Result<ImportReport, String> {
-    use crate::store::{CronRow, SiteRow};
-    use crate::util::{now, rand_hex, valid_domain, valid_site_name};
     let sites_d = dir.join("sites.d");
     if !sites_d.is_dir() {
         return Err(format!(
@@ -219,150 +402,24 @@ pub fn import_site_ctl(
             .and_then(|s| s.to_str())
             .unwrap_or("")
             .to_string();
-        let note = |rep: &mut ImportReport, m: String| rep.lines.push(format!("  {m}"));
         rep.lines.push(format!("{name}:"));
         let meta = std::fs::read_to_string(&meta_path).map_err(|e| e.to_string())?;
         let yml = std::fs::read_to_string(sites_d.join(format!("{name}.yml"))).unwrap_or_default();
-        let image = yml
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("image:"))
-            .map(|v| v.trim().to_string())
-            .unwrap_or_default();
-        let domain = meta_value(&meta, "DOMAIN")
-            .unwrap_or_default()
-            .to_ascii_lowercase();
-        let mem: u32 = meta_value(&meta, "MEM")
-            .and_then(|m| m.parse().ok())
-            .unwrap_or(256);
-        let skip = |rep: &mut ImportReport, why: String| {
-            rep.skipped += 1;
-            rep.lines.push(format!("  SKIPPED: {why}"));
-        };
-        if !valid_site_name(&name) {
-            skip(&mut rep, "the name is not valid in Rustle (letters, digits and dashes, no leading or trailing dash)".into());
-            continue;
-        }
-        if !valid_domain(&domain) {
-            skip(&mut rep, format!("invalid domain '{domain}'"));
-            continue;
-        }
-        let repo = match crate::imageref::ImageRef::parse(&image) {
-            Ok(r) if r.is_ghcr() => r.repo_key(),
-            Ok(r) => {
-                skip(
-                    &mut rep,
-                    format!(
-                        "image '{image}' is on {}; only ghcr.io images are supported",
-                        r.host
-                    ),
-                );
-                continue;
+        let outcome = plan_site(dir, &name, &meta, &yml).and_then(|plan| {
+            rep.lines
+                .extend(plan.notes.iter().map(|n| format!("  {n}")));
+            if dry_run {
+                return Ok(());
             }
-            Err(e) => {
-                skip(&mut rep, format!("cannot read the image ('{image}'): {e}"));
-                continue;
-            }
-        };
-        let ram = mem.div_ceil(32).saturating_mul(32).clamp(64, 512);
-        if ram != mem {
-            note(
-                &mut rep,
-                format!("RAM {mem} MB becomes {ram} MB (Rustle uses steps of 32, 64 to 512)"),
-            );
-        }
-        let env_text = std::fs::read_to_string(dir.join("env").join(format!("{name}.env")))
-            .unwrap_or_default();
-        let vars = parse_env_file(&env_text);
-        if meta_value(&meta, "WWW").is_some_and(|w| w != "0") {
-            note(&mut rep, "WARNING: the www redirect is not supported by Rustle yet; keep it in your Caddyfile".into());
-        }
-        if meta_value(&meta, "CACHE").is_some_and(|c| c == "1") {
-            note(&mut rep, "WARNING: the persistent .next/cache volume is not supported (Rustle runs stateless containers); the cache is rebuilt after each deploy".into());
-        }
-        if meta_value(&meta, "HEALTH").is_some_and(|h| h != "/") {
-            note(
-                &mut rep,
-                "WARNING: Rustle checks health on '/', not on your custom path".into(),
-            );
-        }
-        let cron_text = std::fs::read_to_string(dir.join("cron.d").join(format!("{name}.cron")))
-            .unwrap_or_default();
-        let mut crons: Vec<(String, String)> = Vec::new();
-        for l in cron_text.lines().filter(|l| !l.trim().is_empty()) {
-            match l.split_once('\t') {
-                Some((s, p))
-                    if crate::cron::CronExpr::parse(s).is_ok()
-                        && crate::jobs::validate_http_path(p.trim()).is_ok() =>
-                {
-                    crons.push((s.trim().to_string(), p.trim().to_string()))
-                }
-                _ => note(
-                    &mut rep,
-                    format!("WARNING: ignored an unreadable cron line: {l}"),
-                ),
+            persist_site(&store, &key, &plan)
+        });
+        match outcome {
+            Ok(()) => rep.imported += 1,
+            Err(why) => {
+                rep.skipped += 1;
+                rep.lines.push(format!("  SKIPPED: {why}"));
             }
         }
-        if !crons.is_empty() && !vars.iter().any(|v| v.key == "CRON_SECRET") {
-            note(&mut rep, "WARNING: the site has cron jobs but no CRON_SECRET in its env file; they will be called without a bearer token".into());
-        }
-        note(
-            &mut rep,
-            format!(
-                "{domain}  {repo}  {ram} MB  {} env vars  {} cron jobs",
-                vars.len(),
-                crons.len()
-            ),
-        );
-        if dry_run {
-            rep.imported += 1;
-            continue;
-        }
-        let t = now();
-        let row = SiteRow {
-            id: rand_hex(6),
-            name: name.clone(),
-            domain: domain.clone(),
-            image_repo: repo,
-            container_port: 3000,
-            ram_limit_mb: ram,
-            status: "created".into(),
-            current_deployment_id: None,
-            registry_id: None,
-            zero_downtime: false,
-            compat_caps: false,
-            created_at: t,
-            updated_at: t,
-        };
-        if let Err(e) = store.insert_site(&row) {
-            skip(
-                &mut rep,
-                format!(
-                    "could not create it ({}): it may already exist in Rustle",
-                    e.message
-                ),
-            );
-            continue;
-        }
-        store
-            .replace_env(&row.id, &crate::sites::seal_env(&key, &row.id, &vars))
-            .map_err(|e| e.message)?;
-        for (i, (sched, path)) in crons.iter().enumerate() {
-            store
-                .insert_cron(&CronRow {
-                    id: rand_hex(6),
-                    kind: "http".into(),
-                    name: format!("{name} cron {}", i + 1),
-                    schedule: sched.clone(),
-                    site_id: Some(row.id.clone()),
-                    argv_json: Some(serde_json::to_string(&[path]).map_err(|e| e.to_string())?),
-                    enabled: true,
-                    system_key: None,
-                    last_fired_minute: None,
-                })
-                .map_err(|e| e.message)?;
-        }
-        store.audit(t, "cli", "site.import", &name);
-        rep.imported += 1;
     }
     Ok(rep)
 }
@@ -380,6 +437,53 @@ mod tests {
         )
         .unwrap();
         c
+    }
+
+    #[test]
+    fn init_guards_and_environment_seeding() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cfg(d.path());
+        init(&c, false).unwrap();
+        // key file lost but data present: refuse to mint a new key
+        std::fs::remove_file(&c.master_key_file).unwrap();
+        let e = init(&c, false).err().unwrap();
+        assert!(
+            e.contains("does not") && e.contains("exists but the master key"),
+            "{e}"
+        );
+        // key file replaced by a different key: refused as well
+        crate::crypto::MasterKey::load(&c.master_key_file, true).unwrap();
+        let e = init(&c, false).err().unwrap();
+        assert!(e.contains("does not match"), "{e}");
+        // an empty database without a key is fine (fresh install that was interrupted)
+        let d2 = tempfile::tempdir().unwrap();
+        let c2 = cfg(d2.path());
+        Store::open(&c2.db_path).unwrap();
+        assert!(init(&c2, false).unwrap().key_created);
+
+        let st = Store::open(&c2.db_path).unwrap();
+        let env = |k: &str| match k {
+            "RUSTLE_PUBLIC_IP" => Some(" 203.0.113.9 ".to_string()),
+            "RUSTLE_ADMIN_DOMAIN" => Some("   ".to_string()),
+            _ => None,
+        };
+        apply_env_settings(&st, env).unwrap();
+        assert_eq!(
+            st.setting("public_ip").unwrap().as_deref(),
+            Some("203.0.113.9")
+        );
+        assert!(
+            st.setting("admin_domain").unwrap().is_none(),
+            "blank values are ignored"
+        );
+        assert!(st.setting("acme_email").unwrap().is_none());
+        // no meminfo: no baseline recorded rather than a bogus one
+        let d3 = tempfile::tempdir().unwrap();
+        let mut c3 = Config::for_tests(d3.path());
+        c3.proc_root = d3.path().join("empty");
+        let st3 = Store::open(&c3.db_path).unwrap();
+        record_baseline(&st3, &c3).unwrap();
+        assert!(st3.setting("base_used_mb").unwrap().is_none());
     }
 
     #[test]

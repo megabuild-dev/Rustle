@@ -14,7 +14,6 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov rust-code-analysis-cli --locked
       - run: scripts/quality.sh crap | tee crap.txt
-        continue-on-error: true
       - uses: actions/upload-artifact@v4
         with: { name: crap, path: crap.txt }
   mutants:

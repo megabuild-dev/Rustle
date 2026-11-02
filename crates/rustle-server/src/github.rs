@@ -270,19 +270,8 @@ impl Github for HttpGithub {
             if (300..400).contains(&r.status) {
                 let loc = r
                     .header("location")
-                    .ok_or_else(|| GhError::Bad("redirect without location".into()))?
-                    .to_string();
-                url = if loc.starts_with('/') {
-                    // relative redirect: keep scheme and host
-                    let scheme_end = url.find("://").map(|i| i + 3).unwrap_or(0);
-                    let host_end = url[scheme_end..]
-                        .find('/')
-                        .map(|i| i + scheme_end)
-                        .unwrap_or(url.len());
-                    format!("{}{}", &url[..host_end], loc)
-                } else {
-                    loc
-                };
+                    .ok_or_else(|| GhError::Bad("redirect without location".into()))?;
+                url = resolve_location(&url, loc);
                 if !redirect_allowed(&url, allow_plain) {
                     return Err(GhError::Bad(
                         "refusing to follow a redirect to an untrusted location".into(),
@@ -298,6 +287,19 @@ impl Github for HttpGithub {
         }
         Err(GhError::Bad("too many redirects".into()))
     }
+}
+
+/// A `Location` header relative to the URL that produced it (absolute URLs pass through).
+fn resolve_location(current: &str, loc: &str) -> String {
+    if !loc.starts_with('/') {
+        return loc.to_string();
+    }
+    let scheme_end = current.find("://").map(|i| i + 3).unwrap_or(0);
+    let host_end = current[scheme_end..]
+        .find('/')
+        .map(|i| i + scheme_end)
+        .unwrap_or(current.len());
+    format!("{}{}", &current[..host_end], loc)
 }
 
 #[derive(Default)]
@@ -427,6 +429,108 @@ impl Github for FakeGithub {
 mod tests {
     use super::*;
     use crate::testutil::MockHttp;
+
+    #[test]
+    fn redirect_resolution_and_allow_list() {
+        assert_eq!(
+            resolve_location("https://github.com/o/r/x", "/y/z"),
+            "https://github.com/y/z"
+        );
+        assert_eq!(
+            resolve_location("http://127.0.0.1:80", "/y"),
+            "http://127.0.0.1:80/y"
+        );
+        assert_eq!(
+            resolve_location("https://a.com/p", "https://b.com/q"),
+            "https://b.com/q"
+        );
+        assert_eq!(resolve_location("noscheme/p", "/y"), "noscheme/y");
+        assert!(redirect_allowed("https://github.com/x", false));
+        assert!(redirect_allowed(
+            "https://objects.githubusercontent.com/x",
+            false
+        ));
+        assert!(redirect_allowed("https://api.github.com:443/x", false));
+        assert!(!redirect_allowed("https://evilgithub.com/x", false));
+        assert!(!redirect_allowed("https://github.com.evil.io/x", false));
+        assert!(
+            !redirect_allowed("http://github.com/x", false),
+            "no downgrade"
+        );
+        assert!(!redirect_allowed("http://127.0.0.1/x", false));
+        assert!(
+            redirect_allowed("http://127.0.0.1/x", true),
+            "tests against a local mock"
+        );
+        assert!(!redirect_allowed("ftp://github.com/x", true));
+    }
+
+    #[tokio::test]
+    async fn download_follows_safe_redirects_and_enforces_limits() {
+        let m = MockHttp::start(|r| match r.path.as_str() {
+            "/a" => (302, vec![("location".into(), "/b".into())], String::new()),
+            "/b" => (200, vec![], "payload".into()),
+            "/big" => (200, vec![], "x".repeat(100)),
+            "/loop" => (
+                302,
+                vec![("location".into(), "/loop".into())],
+                String::new(),
+            ),
+            "/nolocation" => (302, vec![], String::new()),
+            "/evil" => (
+                301,
+                vec![("location".into(), "https://evil.example/x".into())],
+                String::new(),
+            ),
+            "/missing" => (404, vec![], "{\"message\":\"Not Found\"}".into()),
+            _ => (500, vec![], String::new()),
+        })
+        .await;
+        let gh = HttpGithub::new(format!("http://{}", m.addr));
+        let u = |p: &str| format!("http://{}{}", m.addr, p);
+        assert_eq!(gh.download(&u("/a"), 1000).await.unwrap(), b"payload");
+        assert_eq!(
+            gh.download(&u("/big"), 100).await.unwrap().len(),
+            100,
+            "exactly the limit is fine"
+        );
+        assert!(gh
+            .download(&u("/big"), 99)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("too large"));
+        assert!(gh
+            .download(&u("/loop"), 1000)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("too many redirects"));
+        assert!(gh
+            .download(&u("/nolocation"), 1000)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("without location"));
+        assert!(gh
+            .download(&u("/evil"), 1000)
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("untrusted"));
+        assert!(matches!(
+            gh.download(&u("/missing"), 1000).await,
+            Err(GhError::Api { status: 404, .. })
+        ));
+        assert!(matches!(
+            gh.download("http://127.0.0.1:1/x", 10).await,
+            Err(GhError::Unreachable(_))
+        ));
+        assert!(matches!(
+            gh.download("not a url", 10).await,
+            Err(GhError::Unreachable(_))
+        ));
+    }
 
     #[tokio::test]
     async fn put_and_list_and_delete_shapes() {

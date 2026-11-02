@@ -5,6 +5,7 @@ pub mod auth;
 pub mod backup;
 pub mod caddy;
 pub mod cli;
+pub mod commands;
 pub mod config;
 pub mod cron;
 pub mod crypto;

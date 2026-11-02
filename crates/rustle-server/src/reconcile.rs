@@ -4,6 +4,7 @@
 use crate::app::AppState;
 use crate::caddy::BaseParams;
 use crate::sites::{admin_domain, placeholder_dial, public_ip, upstream};
+use crate::store::SiteRow;
 use std::collections::HashSet;
 
 pub fn base_params(state: &AppState) -> BaseParams {
@@ -67,59 +68,17 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
     };
     let external = state.cfg.gateway_external;
     for s in &sites {
-        let id = format!("site-{}", s.name);
+        let exists = present.contains(&format!("site-{}", s.name));
         // Managed Caddy: only repair what is missing. Shared Caddy: container IPs can change after a
         // Docker restart or reboot, so the upstream is re-checked on every pass.
-        if !full && !external && present.contains(&id) {
+        if !full && !external && exists {
             continue;
         }
-        let dep = s
-            .current_deployment_id
-            .as_deref()
-            .and_then(|d| state.store.get_deployment(d).ok().flatten());
-        let upstream = match dep
-            .as_ref()
-            .and_then(|d| d.container_name.clone().zip(d.container_id.clone()))
-        {
-            Some((cname, cid)) => {
-                let mut ip = None;
-                if external {
-                    match state.runtime.inspect(&cid).await {
-                        Ok(info) if info.running => ip = info.ip,
-                        // Not running: leave whatever route exists untouched.
-                        _ => continue,
-                    }
-                    if ip.is_none() && !state.cfg.gateway_names {
-                        continue; // a host Caddy needs the address
-                    }
-                }
-                upstream(state, &cname, ip.as_deref(), s.container_port)
-            }
-            // Nothing deployed yet: a shared Caddy keeps serving the domain as it did before.
-            None if external => continue,
-            None => placeholder_dial(&s.name, s.container_port),
+        let Some(dial) = desired_upstream(state, s, external).await else {
+            continue;
         };
-        if external && present.contains(&id) && !full {
-            // Cheap path: only touch Caddy when the upstream actually differs.
-            if state
-                .gateway
-                .set_upstream(&s.name, &upstream)
-                .await
-                .is_err()
-            {
-                let _ = state
-                    .gateway
-                    .upsert_site(&s.name, &s.domain, &upstream)
-                    .await;
-            }
-            continue;
-        }
-        if let Err(e) = state
-            .gateway
-            .upsert_site(&s.name, &s.domain, &upstream)
-            .await
-        {
-            return Some(format!("could not configure route for {}: {e}", s.name));
+        if let Err(e) = push_route(state, s, &dial, exists && !full && external).await {
+            return Some(e);
         }
     }
     let known: HashSet<String> = sites.iter().map(|s| format!("site-{}", s.name)).collect();
@@ -135,6 +94,51 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
         start_current_containers(state).await;
     }
     None
+}
+
+/// Where a site's route should point; `None` leaves whatever route exists untouched.
+async fn desired_upstream(state: &AppState, s: &SiteRow, external: bool) -> Option<String> {
+    let dep = s
+        .current_deployment_id
+        .as_deref()
+        .and_then(|d| state.store.get_deployment(d).ok().flatten());
+    let Some((cname, cid)) = dep
+        .as_ref()
+        .and_then(|d| d.container_name.clone().zip(d.container_id.clone()))
+    else {
+        // Nothing deployed yet: a shared Caddy keeps serving the domain as it did before.
+        return if external {
+            None
+        } else {
+            Some(placeholder_dial(&s.name, s.container_port))
+        };
+    };
+    let mut ip = None;
+    if external {
+        match state.runtime.inspect(&cid).await {
+            Ok(info) if info.running => ip = info.ip,
+            _ => return None, // not running: leave the route alone
+        }
+        if ip.is_none() && !state.cfg.gateway_names {
+            return None; // a host Caddy needs the address
+        }
+    }
+    Some(upstream(state, &cname, ip.as_deref(), s.container_port))
+}
+
+/// Create or repair one route. `cheap` only retargets the upstream of an existing route.
+async fn push_route(state: &AppState, s: &SiteRow, dial: &str, cheap: bool) -> Result<(), String> {
+    if cheap {
+        if state.gateway.set_upstream(&s.name, dial).await.is_err() {
+            let _ = state.gateway.upsert_site(&s.name, &s.domain, dial).await;
+        }
+        return Ok(());
+    }
+    state
+        .gateway
+        .upsert_site(&s.name, &s.domain, dial)
+        .await
+        .map_err(|e| format!("could not configure route for {}: {e}", s.name))
 }
 
 /// Containers we created that no deployment refers to; with `apps == false` only exited one-shot

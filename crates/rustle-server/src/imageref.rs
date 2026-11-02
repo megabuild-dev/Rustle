@@ -49,6 +49,51 @@ fn valid_tag(t: &str) -> bool {
             .all(|&c| c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'-')
 }
 
+fn split_digest(input: &str) -> Result<(&str, Option<String>), ImageRefError> {
+    match input.rsplit_once('@') {
+        Some((r, d)) if valid_digest(d) => Ok((r, Some(d.to_string()))),
+        Some(_) => Err(ImageRefError("digest")),
+        None => Ok((input, None)),
+    }
+}
+
+/// A tag is the part after the last ':' that comes after the last '/'.
+fn split_tag(rest: &str) -> Result<(&str, Option<String>), ImageRefError> {
+    let last_slash = rest.rfind('/').map(|i| i as isize).unwrap_or(-1);
+    match rest.rfind(':') {
+        Some(i) if (i as isize) > last_slash => {
+            let t = &rest[i + 1..];
+            if !valid_tag(t) {
+                return Err(ImageRefError("tag"));
+            }
+            Ok((&rest[..i], Some(t.to_string())))
+        }
+        _ => Ok((rest, None)),
+    }
+}
+
+/// The first component is a registry host when it has a dot or port or is `localhost`; otherwise
+/// the image lives on Docker Hub (a bare name gets the `library/` namespace).
+fn split_host(mut parts: Vec<&str>) -> (String, Vec<&str>) {
+    let first = parts[0];
+    if parts.len() > 1 && (first.contains('.') || first.contains(':') || first == "localhost") {
+        let h = first.to_ascii_lowercase();
+        parts.remove(0);
+        return (h, parts);
+    }
+    if parts.len() == 1 {
+        parts.insert(0, "library");
+    }
+    ("docker.io".to_string(), parts)
+}
+
+fn valid_host(host: &str) -> bool {
+    host.len() <= 253
+        && host
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b':')
+}
+
 fn valid_digest(d: &str) -> bool {
     match d.strip_prefix("sha256:") {
         Some(h) => {
@@ -71,53 +116,17 @@ impl ImageRef {
         {
             return Err(ImageRefError("whitespace"));
         }
-        let (rest, digest) = match input.rsplit_once('@') {
-            Some((r, d)) => {
-                if !valid_digest(d) {
-                    return Err(ImageRefError("digest"));
-                }
-                (r, Some(d.to_string()))
-            }
-            None => (input, None),
-        };
-        // A tag is the part after the last ':' that comes after the last '/'.
-        let last_slash = rest.rfind('/').map(|i| i as isize).unwrap_or(-1);
-        let (name, tag) = match rest.rfind(':') {
-            Some(i) if (i as isize) > last_slash => {
-                let t = &rest[i + 1..];
-                if !valid_tag(t) {
-                    return Err(ImageRefError("tag"));
-                }
-                (&rest[..i], Some(t.to_string()))
-            }
-            _ => (rest, None),
-        };
-        let mut parts: Vec<&str> = name.split('/').collect();
+        let (rest, digest) = split_digest(input)?;
+        let (name, tag) = split_tag(rest)?;
+        let parts: Vec<&str> = name.split('/').collect();
         if parts.iter().any(|p| p.is_empty()) {
             return Err(ImageRefError("empty path component"));
         }
-        let first = parts[0];
-        let (host, path_parts): (String, Vec<&str>) = if parts.len() > 1
-            && (first.contains('.') || first.contains(':') || first == "localhost")
-        {
-            let h = first.to_ascii_lowercase();
-            parts.remove(0);
-            (h, parts)
-        } else {
-            let mut p = parts;
-            if p.len() == 1 {
-                p.insert(0, "library");
-            }
-            ("docker.io".to_string(), p)
-        };
+        let (host, path_parts) = split_host(parts);
         if path_parts.is_empty() || !path_parts.iter().all(|c| valid_component(c)) {
             return Err(ImageRefError("repository path"));
         }
-        if host.len() > 253
-            || !host
-                .bytes()
-                .all(|c| c.is_ascii_alphanumeric() || c == b'.' || c == b'-' || c == b':')
-        {
+        if !valid_host(&host) {
             return Err(ImageRefError("registry host"));
         }
         Ok(ImageRef {

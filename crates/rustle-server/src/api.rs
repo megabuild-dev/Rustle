@@ -1474,4 +1474,230 @@ mod tests {
             "no sampling without a viewer"
         );
     }
+
+    async fn deployed(e: &TestEnv, c: &Client, name: &str) -> SiteDto {
+        let site: SiteDto = c.post("/api/v1/sites", site_body(name)).await.json();
+        let row = e.state.store.get_site(&site.id).unwrap().unwrap();
+        crate::deploy::webhook(&e.state, &row, &format!("ghcr.io/o/{name}:1")).unwrap();
+        e.state.deployer.wait_idle(&row.id).await;
+        site
+    }
+
+    #[tokio::test]
+    async fn logs_need_a_running_container() {
+        let (e, c) = logged_in().await;
+        let site: SiteDto = c.post("/api/v1/sites", site_body("blog")).await.json();
+        assert_eq!(
+            c.get(&format!("/api/v1/sites/{}/logs", site.id))
+                .await
+                .status,
+            409
+        );
+        assert_eq!(
+            c.get(&format!("/api/v1/sites/{}/logs/stream", site.id))
+                .await
+                .status,
+            409
+        );
+        assert_eq!(c.get("/api/v1/sites/nope/logs").await.status, 404);
+
+        let site = deployed(&e, &c, "shop").await;
+        let r = c
+            .get(&format!("/api/v1/sites/{}/logs?tail=9999", site.id))
+            .await;
+        assert_eq!(r.status, 200);
+        assert!(r.json::<serde_json::Value>()["logs"]
+            .as_str()
+            .unwrap()
+            .contains("started"));
+        // the runtime going away is a 503, not a 500
+        for ct in e.runtime.containers() {
+            crate::docker::Runtime::remove(&*e.runtime, &ct.id, true)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            c.get(&format!("/api/v1/sites/{}/logs", site.id))
+                .await
+                .status,
+            503
+        );
+        assert_eq!(
+            c.get(&format!("/api/v1/sites/{}/logs/stream", site.id))
+                .await
+                .status,
+            503
+        );
+    }
+
+    #[tokio::test]
+    async fn log_stream_forwards_events_and_ends_when_the_browser_leaves() {
+        use http_body_util::BodyExt;
+        let (e, c) = logged_in().await;
+        let site = deployed(&e, &c, "shop").await;
+        let req = Request::builder()
+            .method(Method::GET)
+            .uri(format!("/api/v1/sites/{}/logs/stream?tail=5", site.id))
+            .header("cookie", c.cookie.clone().unwrap())
+            .body(Body::empty())
+            .unwrap();
+        let resp = c.app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), 200);
+        assert_eq!(resp.headers()[header::CONTENT_TYPE], "text/event-stream");
+        let mut body = resp.into_body();
+        let frame = tokio::time::timeout(Duration::from_secs(5), body.frame())
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let text = String::from_utf8_lossy(frame.data_ref().unwrap()).to_string();
+        assert!(
+            text.contains("event: log") && text.contains("started"),
+            "{text}"
+        );
+        drop(body);
+    }
+
+    #[tokio::test]
+    async fn cron_run_now_and_manual_backup() {
+        let (e, c) = logged_in().await;
+        assert_eq!(
+            c.post("/api/v1/cron/nope/run", serde_json::json!({}))
+                .await
+                .status,
+            404
+        );
+        crate::jobs::seed_system_jobs(&e.state.store).unwrap();
+        let list: Vec<CronJobDto> = c.get("/api/v1/cron").await.json();
+        let hk = list
+            .iter()
+            .find(|j| j.name.contains("ousekeeping") || j.kind == "system")
+            .unwrap();
+        assert_eq!(
+            c.post(
+                &format!("/api/v1/cron/{}/run", hk.id),
+                serde_json::json!({})
+            )
+            .await
+            .status,
+            202
+        );
+        // a second trigger while the first is still marked running is refused
+        e.state.running_jobs.lock().unwrap().insert(hk.id.clone());
+        assert_eq!(
+            c.post(
+                &format!("/api/v1/cron/{}/run", hk.id),
+                serde_json::json!({})
+            )
+            .await
+            .status,
+            409
+        );
+        e.state.running_jobs.lock().unwrap().remove(&hk.id);
+
+        // manual backup: disabled -> a "skipped" message, and the slot is released afterwards
+        let r = c
+            .post("/api/v1/system/backup/run", serde_json::json!({}))
+            .await;
+        assert_eq!(r.status, 200);
+        assert!(r.json::<serde_json::Value>()["message"]
+            .as_str()
+            .unwrap()
+            .contains("not enabled"));
+        assert!(!e
+            .state
+            .running_jobs
+            .lock()
+            .unwrap()
+            .contains("manual-backup"));
+        // while one is running, another is a conflict
+        e.state
+            .running_jobs
+            .lock()
+            .unwrap()
+            .insert("manual-backup".into());
+        assert_eq!(
+            c.post("/api/v1/system/backup/run", serde_json::json!({}))
+                .await
+                .status,
+            409
+        );
+    }
+
+    #[tokio::test]
+    async fn settings_validation_paths() {
+        let (e, c) = logged_in().await;
+        let put = |b: serde_json::Value| c.req(Method::PUT, "/api/v1/system/settings", Some(b));
+        // email rules
+        for bad in [
+            "no-at-sign",
+            "a b@c.d",
+            &format!("{}@x.io", "a".repeat(200)),
+        ] {
+            let r = put(serde_json::json!({"admin_domain":"","acme_email":bad})).await;
+            assert_eq!(r.status, 400, "{bad}");
+        }
+        assert_eq!(
+            put(serde_json::json!({"admin_domain":"","acme_email":"ops@example.com"}))
+                .await
+                .status,
+            200
+        );
+        // budget override bounds
+        for (v, code) in [(63, 400), (64, 200), (65536, 200), (65537, 400)] {
+            let r =
+                put(serde_json::json!({"admin_domain":"","acme_email":"","budget_override_mb":v}))
+                    .await;
+            assert_eq!(r.status, code, "{v}");
+        }
+        assert_eq!(
+            e.state
+                .store
+                .setting("budget_override_mb")
+                .unwrap()
+                .as_deref(),
+            Some("65536")
+        );
+        let r = put(serde_json::json!({"admin_domain":"","acme_email":""})).await;
+        assert_eq!(r.status, 200);
+        assert!(
+            e.state
+                .store
+                .setting("budget_override_mb")
+                .unwrap()
+                .is_none(),
+            "omitting it clears the override"
+        );
+        // the DNS check applies to a new dashboard domain unless skipped; the fake resolver knows nothing
+        e.state
+            .store
+            .set_setting("public_ip", "203.0.113.7")
+            .unwrap();
+        let r = put(serde_json::json!({"admin_domain":"dash.example.com","acme_email":""})).await;
+        assert_eq!((r.status.as_u16(), r.code().as_str()), (422, "dns_missing"));
+        e.resolver.set("dash.example.com", &["198.51.100.1"]);
+        let r = put(serde_json::json!({"admin_domain":"dash.example.com","acme_email":""})).await;
+        assert_eq!(
+            (r.status.as_u16(), r.code().as_str()),
+            (422, "dns_mismatch")
+        );
+        e.resolver.set("dash.example.com", &["203.0.113.7"]);
+        let r = put(serde_json::json!({"admin_domain":"dash.example.com","acme_email":""})).await;
+        assert_eq!(r.status, 200);
+        e.resolver.set("dash.example.com", &[]);
+        e.state.store.set_setting("admin_domain", "").unwrap();
+        let r = put(serde_json::json!({"admin_domain":"dash.example.com","acme_email":"","skip_dns_check":true})).await;
+        assert_eq!(r.status, 200);
+        // keeping the same domain does not re-check DNS
+        let r =
+            put(serde_json::json!({"admin_domain":"dash.example.com","acme_email":"x@y.io"})).await;
+        assert_eq!(r.status, 200);
+        assert_eq!(
+            c.get("/api/v1/system/settings")
+                .await
+                .json::<SettingsDto>()
+                .acme_email,
+            "x@y.io"
+        );
+    }
 }

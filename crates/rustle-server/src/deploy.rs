@@ -2,7 +2,7 @@
 //! stop-first (default) and start-first (opt-in) strategies, health checks, rollback.
 
 use crate::app::AppState;
-use crate::docker::{ContainerSpec, RtError};
+use crate::docker::{ContainerSpec, RtError, Runtime};
 use crate::error::{AppError, AppResult};
 use crate::imageref::ImageRef;
 use crate::metrics;
@@ -237,68 +237,98 @@ fn has_headroom(state: &AppState, ram_limit_mb: u32) -> bool {
     m.available_kb / 1024 >= ram_limit_mb as u64 + 64
 }
 
-async fn run_deploy(
+/// What is needed to undo a failed attempt.
+struct Undo {
+    old: Option<DeploymentRow>,
+    stopped_old: bool,
+    prev_ok: bool,
+}
+
+impl Undo {
+    async fn fail(&self, rt: &dyn Runtime, msg: String) -> Failure {
+        restore_old(rt, &self.old, self.stopped_old, self.prev_ok, msg).await
+    }
+}
+
+/// The previous deployment, if it still has a container.
+fn previous_deployment(
     state: &AppState,
     site: &SiteRow,
-    dep: &mut DeploymentRow,
-    job: &Job,
-) -> Result<(), Failure> {
-    let fail = |msg: String, previous_ok: bool| Failure { msg, previous_ok };
-    let rt = &state.runtime;
-
-    let r = ImageRef::parse(&job.image_ref)
-        .map_err(|e| fail(e.to_string(), site.current_deployment_id.is_some()))?;
-    if r.repo_key() != site.image_repo {
-        return Err(fail(
-            "image repository does not match the site".into(),
-            site.current_deployment_id.is_some(),
-        ));
-    }
-
-    // The previous deployment, if it still has a container.
-    let old = site
-        .current_deployment_id
+    dep: &DeploymentRow,
+) -> Option<DeploymentRow> {
+    site.current_deployment_id
         .as_deref()
         .and_then(|d| state.store.get_deployment(d).ok().flatten())
-        .filter(|d| d.id != dep.id && d.container_id.is_some());
-    let prev_ok = old.is_some();
+        .filter(|d| d.id != dep.id && d.container_id.is_some())
+}
 
+/// Pull the image and pin it by digest.
+async fn pull_and_pin(
+    state: &AppState,
+    site: &SiteRow,
+    job: &Job,
+    r: &ImageRef,
+    prev_ok: bool,
+) -> Result<String, Failure> {
+    let fail = |msg: String| Failure {
+        msg,
+        previous_ok: prev_ok,
+    };
+    let rt = &state.runtime;
     let auth = match &site.registry_id {
-        Some(rid) => Some(registry_auth(state, rid).map_err(|e| fail(e.message, prev_ok))?),
+        Some(rid) => Some(registry_auth(state, rid).map_err(|e| fail(e.message))?),
         None => None,
     };
     let pull_ref = r.canonical();
     rt.pull(&pull_ref, auth.as_ref())
         .await
-        .map_err(|e| fail(format!("pull failed: {e}"), prev_ok))?;
-    let digest = match &job.digest_override {
-        Some(d) => d.clone(),
+        .map_err(|e| fail(format!("pull failed: {e}")))?;
+    match &job.digest_override {
+        Some(d) => Ok(d.clone()),
         None => rt
             .resolve_digest(&pull_ref, &r.repo_key())
             .await
-            .map_err(|e| fail(format!("cannot resolve image digest: {e}"), prev_ok))?,
-    };
-    dep.image_digest = Some(digest.clone());
+            .map_err(|e| fail(format!("cannot resolve image digest: {e}"))),
+    }
+}
 
+/// Environment for this deployment (override for rollbacks), with an encrypted snapshot on `dep`.
+fn deployment_env(
+    state: &AppState,
+    site: &SiteRow,
+    job: &Job,
+    dep: &mut DeploymentRow,
+    prev_ok: bool,
+) -> Result<Vec<String>, Failure> {
+    let fail = |msg: String| Failure {
+        msg,
+        previous_ok: prev_ok,
+    };
     let vars: Vec<EnvVar> = match &job.env_override {
         Some(v) => v.clone(),
-        None => load_env(state, &site.id).map_err(|e| fail(e.message, prev_ok))?,
+        None => load_env(state, &site.id).map_err(|e| fail(e.message))?,
     };
-    let snap = serde_json::to_string(&vars).map_err(|e| fail(e.to_string(), prev_ok))?;
+    let snap = serde_json::to_string(&vars).map_err(|e| fail(e.to_string()))?;
     dep.env_snapshot_enc = Some(state.key.seal_str(&snap, &format!("snap:{}", dep.id)));
-    let env = effective_env(&vars, site.container_port, site.ram_limit_mb);
+    Ok(effective_env(&vars, site.container_port, site.ram_limit_mb))
+}
 
-    let start_first = site.zero_downtime && prev_ok && has_headroom(state, site.ram_limit_mb);
-    let name = format!("rustle-{}-{}", site.name, &dep.id[..dep.id.len().min(8)]);
+fn container_spec(
+    state: &AppState,
+    site: &SiteRow,
+    dep: &DeploymentRow,
+    digest: String,
+    env: Vec<String>,
+) -> ContainerSpec {
     let labels = BTreeMap::from([
         ("rustle.managed".to_string(), "1".to_string()),
         ("rustle.kind".to_string(), "app".to_string()),
         ("rustle.site".to_string(), site.id.clone()),
         ("rustle.deployment".to_string(), dep.id.clone()),
     ]);
-    let spec = ContainerSpec {
-        name: name.clone(),
-        image: digest.clone(),
+    ContainerSpec {
+        name: format!("rustle-{}-{}", site.name, &dep.id[..dep.id.len().min(8)]),
+        image: digest,
         env,
         ram_limit_mb: site.ram_limit_mb,
         labels,
@@ -306,70 +336,16 @@ async fn run_deploy(
         network: state.cfg.network.clone(),
         cmd: None,
         long_running: true,
-    };
-
-    // Stop-first: the old container is stopped but NOT removed, so it can be restarted if the
-    // new one fails. Start-first leaves it running until the new one is healthy.
-    let mut stopped_old = false;
-    let mut old_gone = false;
-    if !start_first {
-        if let Some(o) = &old {
-            match rt
-                .stop(
-                    o.container_id.as_deref().unwrap(),
-                    state.tuning.stop_timeout_secs,
-                )
-                .await
-            {
-                Ok(()) => stopped_old = true,
-                Err(RtError::NotFound) => old_gone = true, // the container vanished: nothing to restore later
-                Err(e) => {
-                    return Err(fail(
-                        format!("could not stop the running version: {e}"),
-                        true,
-                    ))
-                }
-            }
-        }
     }
+}
 
-    let prev_ok = prev_ok && !old_gone;
-
-    let id = match rt.create(&spec).await {
-        Ok(id) => id,
-        Err(e) => {
-            return Err(restore_old(
-                rt.as_ref(),
-                &old,
-                stopped_old,
-                prev_ok,
-                format!("create failed: {e}"),
-            )
-            .await)
-        }
-    };
-    dep.container_id = Some(id.clone());
-    dep.container_name = Some(name.clone());
-    if let Err(e) = rt.start(&id).await {
-        let _ = rt.remove(&id, true).await;
-        return Err(restore_old(
-            rt.as_ref(),
-            &old,
-            stopped_old,
-            prev_ok,
-            format!("start failed: {e}"),
-        )
-        .await);
-    }
-
-    // Health: the container must stay up and answer on its port.
-    let mut healthy = false;
-    let mut live_ip: Option<String> = None;
+/// Wait until the container answers on its port. `Ok(ip)` when healthy, `Err(reason)` otherwise.
+async fn wait_healthy(state: &AppState, id: &str, port: u16) -> Result<String, String> {
     let mut why = String::from("no response before the deadline");
     for _ in 0..state.tuning.health_attempts {
-        match rt.inspect(&id).await {
+        match state.runtime.inspect(id).await {
             Ok(info) if !info.running => {
-                why = format!(
+                return Err(format!(
                     "container exited with code {}{}",
                     info.exit_code,
                     if info.oom_killed {
@@ -377,15 +353,12 @@ async fn run_deploy(
                     } else {
                         ""
                     }
-                );
-                break;
+                ));
             }
             Ok(info) => {
                 if let Some(ip) = info.ip {
-                    if state.health.probe(&ip, site.container_port).await {
-                        healthy = true;
-                        live_ip = Some(ip);
-                        break;
+                    if state.health.probe(&ip, port).await {
+                        return Ok(ip);
                     }
                 }
             }
@@ -396,37 +369,110 @@ async fn run_deploy(
         }
         tokio::time::sleep(state.tuning.health_interval).await;
     }
-    if !healthy {
-        let tail = rt.logs(&id, 15).await.unwrap_or_default();
+    Err(why)
+}
+
+/// Create and start the new container; on failure the half-made container is removed.
+async fn create_and_start(rt: &dyn Runtime, spec: &ContainerSpec) -> Result<String, String> {
+    let id = rt
+        .create(spec)
+        .await
+        .map_err(|e| format!("create failed: {e}"))?;
+    if let Err(e) = rt.start(&id).await {
         let _ = rt.remove(&id, true).await;
-        let tail = tail.trim();
-        let msg = if tail.is_empty() {
-            format!("health check failed: {why}")
-        } else {
-            format!("health check failed: {why}. Last logs: {tail}")
-        };
-        return Err(restore_old(rt.as_ref(), &old, stopped_old, prev_ok, msg).await);
+        return Err(format!("start failed: {e}"));
     }
+    Ok(id)
+}
+
+async fn run_deploy(
+    state: &AppState,
+    site: &SiteRow,
+    dep: &mut DeploymentRow,
+    job: &Job,
+) -> Result<(), Failure> {
+    let rt = &state.runtime;
+    let had_current = site.current_deployment_id.is_some();
+    let r = ImageRef::parse(&job.image_ref).map_err(|e| Failure {
+        msg: e.to_string(),
+        previous_ok: had_current,
+    })?;
+    if r.repo_key() != site.image_repo {
+        return Err(Failure {
+            msg: "image repository does not match the site".into(),
+            previous_ok: had_current,
+        });
+    }
+    let old = previous_deployment(state, site, dep);
+    let prev_ok = old.is_some();
+
+    let digest = pull_and_pin(state, site, job, &r, prev_ok).await?;
+    dep.image_digest = Some(digest.clone());
+    let env = deployment_env(state, site, job, dep, prev_ok)?;
+    let start_first = site.zero_downtime && prev_ok && has_headroom(state, site.ram_limit_mb);
+    let spec = container_spec(state, site, dep, digest, env);
+
+    // Stop-first: the old container is stopped but NOT removed, so it can be restarted if the
+    // new one fails. Start-first leaves it running until the new one is healthy.
+    let mut undo = Undo {
+        old,
+        stopped_old: false,
+        prev_ok,
+    };
+    let mut old_gone = false;
+    if let (false, Some(o)) = (start_first, &undo.old) {
+        match rt
+            .stop(
+                o.container_id.as_deref().unwrap(),
+                state.tuning.stop_timeout_secs,
+            )
+            .await
+        {
+            Ok(()) => undo.stopped_old = true,
+            Err(RtError::NotFound) => old_gone = true, // vanished: nothing to restore later
+            Err(e) => {
+                return Err(Failure {
+                    msg: format!("could not stop the running version: {e}"),
+                    previous_ok: true,
+                })
+            }
+        }
+    }
+    undo.prev_ok = prev_ok && !old_gone;
+
+    let id = match create_and_start(rt.as_ref(), &spec).await {
+        Ok(id) => id,
+        Err(msg) => return Err(undo.fail(rt.as_ref(), msg).await),
+    };
+    dep.container_id = Some(id.clone());
+    dep.container_name = Some(spec.name.clone());
+
+    let ip = match wait_healthy(state, &id, site.container_port).await {
+        Ok(ip) => ip,
+        Err(why) => {
+            let tail = rt.logs(&id, 15).await.unwrap_or_default();
+            let _ = rt.remove(&id, true).await;
+            let tail = tail.trim();
+            let msg = if tail.is_empty() {
+                format!("health check failed: {why}")
+            } else {
+                format!("health check failed: {why}. Last logs: {tail}")
+            };
+            return Err(undo.fail(rt.as_ref(), msg).await);
+        }
+    };
 
     // Switch traffic.
+    let dial = upstream(state, &spec.name, Some(&ip), site.container_port);
     if let Err(e) = state
         .gateway
-        .upsert_site(
-            &site.name,
-            &site.domain,
-            &upstream(state, &name, live_ip.as_deref(), site.container_port),
-        )
+        .upsert_site(&site.name, &site.domain, &dial)
         .await
     {
         let _ = rt.remove(&id, true).await;
-        return Err(restore_old(
-            rt.as_ref(),
-            &old,
-            stopped_old,
-            prev_ok,
-            format!("gateway update failed: {e}"),
-        )
-        .await);
+        return Err(undo
+            .fail(rt.as_ref(), format!("gateway update failed: {e}"))
+            .await);
     }
 
     // Record the new deployment as current BEFORE the old container disappears: a crash between
@@ -435,19 +481,24 @@ async fn run_deploy(
     dep.finished_at = Some(now());
     let _ = state.store.update_deployment(dep);
     let _ = state.store.set_current_deployment(&site.id, Some(&dep.id));
-
-    // Success: retire the previous version.
-    if let Some(o) = &old {
-        let cid = o.container_id.as_deref().unwrap();
-        if start_first {
-            let _ = rt.stop(cid, state.tuning.stop_timeout_secs).await;
-        }
-        let _ = rt.remove(cid, true).await;
-        let mut o2 = o.clone();
-        o2.status = "superseded".into();
-        let _ = state.store.update_deployment(&o2);
-    }
+    retire_previous(state, undo.old.as_ref(), start_first).await;
     Ok(())
+}
+
+/// Success: retire the previous version.
+async fn retire_previous(state: &AppState, old: Option<&DeploymentRow>, was_running: bool) {
+    let Some(o) = old else { return };
+    let cid = o.container_id.as_deref().unwrap();
+    if was_running {
+        let _ = state
+            .runtime
+            .stop(cid, state.tuning.stop_timeout_secs)
+            .await;
+    }
+    let _ = state.runtime.remove(cid, true).await;
+    let mut o2 = o.clone();
+    o2.status = "superseded".into();
+    let _ = state.store.update_deployment(&o2);
 }
 
 pub fn rollback(

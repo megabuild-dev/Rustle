@@ -333,40 +333,52 @@ pub async fn call_site_http(
     }
 }
 
-async fn run_http_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) {
-    let fail = |m: &str| (Some(-1), m.to_string());
-    let Some(site) = job
-        .site_id
+fn job_failure(m: &str) -> (Option<i64>, String) {
+    (Some(-1), m.to_string())
+}
+
+fn job_site(state: &AppState, job: &CronRow) -> Option<crate::store::SiteRow> {
+    job.site_id
         .as_deref()
         .and_then(|s| state.store.get_site(s).ok().flatten())
-    else {
-        return fail("site no longer exists");
-    };
-    let Some(path) = job
-        .argv_json
+}
+
+fn job_argv(job: &CronRow) -> Option<Vec<String>> {
+    job.argv_json
         .as_deref()
         .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
-        .and_then(|v| v.into_iter().next())
-    else {
-        return fail("job has no path");
-    };
-    if validate_http_path(&path).is_err() {
-        return fail("job has an invalid path");
-    }
-    let Some(cid) = site
-        .current_deployment_id
+}
+
+/// The container of the site's current deployment, if there is one.
+fn current_container_id(state: &AppState, site: &crate::store::SiteRow) -> Option<String> {
+    site.current_deployment_id
         .as_deref()
         .and_then(|d| state.store.get_deployment(d).ok().flatten())
         .and_then(|d| d.container_id)
-    else {
-        return fail("skipped: site has no deployment");
-    };
-    let ip = match state.runtime.inspect(&cid).await {
+}
+
+async fn running_ip(state: &AppState, cid: &str) -> Option<String> {
+    match state.runtime.inspect(cid).await {
         Ok(i) if i.running => i.ip,
         _ => None,
+    }
+}
+
+async fn run_http_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) {
+    let Some(site) = job_site(state, job) else {
+        return job_failure("site no longer exists");
     };
-    let Some(ip) = ip else {
-        return fail("skipped: site is not running");
+    let Some(path) = job_argv(job).and_then(|v| v.into_iter().next()) else {
+        return job_failure("job has no path");
+    };
+    if validate_http_path(&path).is_err() {
+        return job_failure("job has an invalid path");
+    }
+    let Some(cid) = current_container_id(state, &site) else {
+        return job_failure("skipped: site has no deployment");
+    };
+    let Some(ip) = running_ip(state, &cid).await else {
+        return job_failure("skipped: site is not running");
     };
     let secret = load_env(state, &site.id).ok().and_then(|v| {
         v.into_iter()
@@ -482,6 +494,50 @@ mod tests {
     use crate::docker::Runtime;
     use crate::sites::create_site;
     use rustle_types::{CreateSiteReq, EnvVar};
+
+    #[tokio::test]
+    async fn housekeeping_trims_old_history() {
+        let e = TestEnv::new();
+        let st = &e.state.store;
+        let t = now();
+        st.audit(t - 91 * 86_400, "a", "old", "x");
+        st.audit(t - 89 * 86_400, "a", "recent", "x");
+        for i in 0..35 {
+            st.insert_backup_run(t + i, "ok", 1, "p").unwrap();
+        }
+        seed_system_jobs(st).unwrap();
+        let job = st.list_cron().unwrap().remove(0);
+        for i in 0..60 {
+            let id = st.insert_run(&job.id, t + i).unwrap();
+            st.finish_run(id, t + i, Some(0), "").unwrap();
+        }
+        let before = st.audit_count().unwrap();
+        let msg = run_system(&e.state, "housekeeping").await.unwrap();
+        assert!(msg.contains("trimmed"));
+        assert_eq!(
+            st.audit_count().unwrap(),
+            before - 1,
+            "only the 91-day-old entry goes"
+        );
+        assert_eq!(st.list_backup_runs(100).unwrap().len(), 30);
+        assert_eq!(st.list_runs(&job.id, 100).unwrap().len(), 50);
+    }
+
+    #[tokio::test]
+    async fn run_system_dispatch() {
+        let e = TestEnv::new();
+        let err = run_system(&e.state, "no_such_job").await.unwrap_err();
+        assert!(err.contains("unknown system job 'no_such_job'"));
+        let msg = run_system(&e.state, "prune_images").await.unwrap();
+        assert!(msg.starts_with("removed 0 images"), "{msg}");
+        let msg = run_system(&e.state, "update_check").await.unwrap();
+        assert!(
+            msg.starts_with("update check:") || msg.starts_with("current "),
+            "{msg}"
+        );
+        // backup is dispatched to the backup module (not configured in tests: an error, not a panic)
+        let _ = run_system(&e.state, "backup").await;
+    }
 
     async fn deployed_site(e: &TestEnv) -> crate::store::SiteRow {
         let dto = create_site(
@@ -731,6 +787,84 @@ mod tests {
         let (code, _) =
             call_site_http(&crate::httpc::Target::Tcp("127.0.0.1:1".into()), "/", None).await;
         assert_eq!(code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn http_job_end_to_end_and_every_skip_reason() {
+        use crate::testutil::MockHttp;
+        let m = MockHttp::start(|r| {
+            if r.header("authorization").as_deref() == Some("Bearer top-secret")
+                && r.path == "/api/cron/tick"
+            {
+                (200, vec![], "done".into())
+            } else {
+                (403, vec![], "no".into())
+            }
+        })
+        .await;
+        let port: u32 = m.addr.rsplit(':').next().unwrap().parse().unwrap();
+        let e = TestEnv::new();
+        let dto = create_site(
+            &e.state,
+            CreateSiteReq {
+                name: "api".into(),
+                domain: "api.example.com".into(),
+                image_repo: "ghcr.io/o/api".into(),
+                ram_limit_mb: 128,
+                container_port: port as u16,
+                registry_id: None,
+                env: vec![EnvVar {
+                    key: "CRON_SECRET".into(),
+                    value: "top-secret".into(),
+                }],
+                skip_dns_check: true,
+                override_budget: true,
+            },
+        )
+        .await
+        .unwrap();
+        let site = e.state.store.get_site(&dto.id).unwrap().unwrap();
+        let mut j = job(&site.id, &["/api/cron/tick"]);
+        j.kind = "http".into();
+        // not deployed yet
+        let (c, l) = run_http_job(&e.state, &j).await;
+        assert_eq!(
+            (c, l.as_str()),
+            (Some(-1), "skipped: site has no deployment")
+        );
+        webhook(&e.state, &site, "ghcr.io/o/api:1").unwrap();
+        e.state.deployer.wait_idle(&site.id).await;
+        e.runtime.set_ip(&e.runtime.containers()[0].id, "127.0.0.1");
+        let (c, l) = run_http_job(&e.state, &j).await;
+        assert_eq!((c, l.as_str()), (Some(0), "200 done"));
+        // wrong path -> the server answers 403 -> failure exit code 1
+        let mut bad = job(&site.id, &["/other"]);
+        bad.kind = "http".into();
+        assert_eq!(run_http_job(&e.state, &bad).await.0, Some(1));
+        // malformed jobs
+        let mut none = job(&site.id, &["/x"]);
+        none.argv_json = None;
+        assert_eq!(run_http_job(&e.state, &none).await.1, "job has no path");
+        none.argv_json = Some("[]".into());
+        assert_eq!(run_http_job(&e.state, &none).await.1, "job has no path");
+        none.argv_json = Some("not json".into());
+        assert_eq!(run_http_job(&e.state, &none).await.1, "job has no path");
+        let inv = job(&site.id, &["//evil"]);
+        assert_eq!(
+            run_http_job(&e.state, &inv).await.1,
+            "job has an invalid path"
+        );
+        let mut gone = job("missing-site", &["/x"]);
+        gone.kind = "http".into();
+        assert_eq!(
+            run_http_job(&e.state, &gone).await.1,
+            "site no longer exists"
+        );
+        gone.site_id = None;
+        assert_eq!(
+            run_http_job(&e.state, &gone).await.1,
+            "site no longer exists"
+        );
     }
 
     #[tokio::test]

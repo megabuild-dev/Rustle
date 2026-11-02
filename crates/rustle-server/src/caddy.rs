@@ -667,6 +667,75 @@ mod tests {
         }
     }
 
+    fn admin_params(domain: Option<&str>) -> BaseParams {
+        BaseParams {
+            admin_domain: domain.map(String::from),
+            admin_upstream: "127.0.0.1:3000".into(),
+            admin_listen: ADMIN_LISTEN_DEFAULT.into(),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn set_admin_covers_every_mode() {
+        // external, no domain: the catch-all route must not exist, so it is removed
+        let m = MockHttp::start(external_mock("{\"srv0\":{\"listen\":[\":443\"]}}", true)).await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        gw.set_admin(&admin_params(None)).await.unwrap();
+        assert!(
+            m.requests()
+                .iter()
+                .all(|r| r.method != "POST" && r.method != "PATCH"),
+            "{:?}",
+            m.requests()
+        );
+
+        // external with a domain, route missing: appended to the routes
+        let m = MockHttp::start(external_mock("{\"srv0\":{\"listen\":[\":443\"]}}", true)).await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        gw.set_admin(&admin_params(Some("rustle.example.com")))
+            .await
+            .unwrap();
+        let post = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "POST")
+            .expect("POST");
+        assert!(post.path.ends_with("/routes"), "{}", post.path);
+        assert!(post.body_text().contains("rustle.example.com"));
+        assert!(m.requests().iter().all(|r| r.method != "PATCH"));
+
+        // external with a domain, route present: replaced in place by id
+        let m = MockHttp::start(|r| match (r.method.as_str(), r.path.as_str()) {
+            ("GET", "/id/admin") => (200, vec![], "{}".into()),
+            ("GET", "/config/apps/http/servers") => {
+                (200, vec![], "{\"srv0\":{\"listen\":[\":443\"]}}".into())
+            }
+            _ => (200, vec![], "{}".into()),
+        })
+        .await;
+        let gw = HttpGateway::with_options(Target::Tcp(m.addr.clone()), true, None);
+        gw.set_admin(&admin_params(Some("rustle.example.com")))
+            .await
+            .unwrap();
+        let patch = m
+            .requests()
+            .into_iter()
+            .find(|r| r.method == "PATCH")
+            .expect("PATCH");
+        assert_eq!(patch.path, "/id/admin");
+        assert!(m.requests().iter().all(|r| r.method != "POST"));
+
+        // own Caddy: always a PATCH, and a rejection is surfaced
+        let m = MockHttp::start(|_| (200, vec![], "{}".into())).await;
+        let gw = HttpGateway::new(Target::Tcp(m.addr.clone()));
+        gw.set_admin(&admin_params(None)).await.unwrap();
+        assert_eq!(m.requests()[0].method, "PATCH");
+        let bad = MockHttp::start(|_| (400, vec![], "{\"error\":\"bad\"}".into())).await;
+        let gw = HttpGateway::new(Target::Tcp(bad.addr.clone()));
+        assert!(gw.set_admin(&admin_params(None)).await.is_err());
+    }
+
     #[tokio::test]
     async fn external_mode_autodetects_the_caddyfile_server_and_uses_it() {
         let m = MockHttp::start(external_mock(

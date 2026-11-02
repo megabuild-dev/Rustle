@@ -63,71 +63,52 @@ pub struct Config {
 
 impl Config {
     pub fn from_env() -> Config {
-        let get = |k: &str| std::env::var(k).ok().filter(|v| !v.is_empty());
+        Self::from_lookup(|k| std::env::var(k).ok())
+    }
+
+    /// Build the configuration from any key lookup (the environment in production, a map in tests).
+    pub fn from_lookup(lookup: impl Fn(&str) -> Option<String>) -> Config {
+        let get = |k: &str| lookup(k).filter(|v| !v.is_empty());
         let state_dir =
             PathBuf::from(get("RUSTLE_STATE_DIR").unwrap_or_else(|| "/var/lib/rustle".into()));
-        let unix_socket = match get("RUSTLE_SOCKET") {
-            Some(s) if s == "none" => None,
-            Some(s) => Some(PathBuf::from(s)),
-            None => Some(PathBuf::from("/run/rustle/rustle.sock")),
-        };
-        let local_bind = match get("RUSTLE_BIND") {
-            Some(s) if s == "none" => None,
-            Some(s) => Some(s),
-            None => Some("127.0.0.1:3000".into()),
-        };
+        let unix_socket =
+            optional_or(get("RUSTLE_SOCKET"), "/run/rustle/rustle.sock").map(PathBuf::from);
+        let local_bind = optional_or(get("RUSTLE_BIND"), "127.0.0.1:3000");
         let gateway_external = get("RUSTLE_GATEWAY").is_some_and(|v| v == "external");
-        let admin_upstream = get("RUSTLE_ADMIN_UPSTREAM")
-            .or_else(|| gateway_external.then(|| "127.0.0.1:3000".to_string()))
-            .unwrap_or_else(|| match &unix_socket {
-                Some(p) => format!("unix/{}", p.display()),
-                None => "127.0.0.1:3000".into(),
-            });
+        let path_or = |k: &str, d: &str| PathBuf::from(get(k).unwrap_or_else(|| d.into()));
+        let str_or = |k: &str, d: &str| get(k).unwrap_or_else(|| d.into());
+        let dev = dev_flags(&get);
         Config {
+            admin_upstream: admin_upstream(
+                get("RUSTLE_ADMIN_UPSTREAM"),
+                gateway_external,
+                &unix_socket,
+            ),
+            caddy_admin: Endpoint::parse(
+                &get("CADDY_ADMIN_URL")
+                    .unwrap_or_else(|| default_caddy_admin(gateway_external).into()),
+            ),
             local_bind,
             unix_socket,
             db_path: get("RUSTLE_DB")
                 .map(PathBuf::from)
                 .unwrap_or_else(|| state_dir.join("rustle.db")),
-            master_key_file: get("RUSTLE_MASTER_KEY_FILE")
-                .map(PathBuf::from)
-                .unwrap_or_else(|| PathBuf::from("/etc/rustle/master.key")),
-            docker: Endpoint::parse(
-                &get("DOCKER_HOST").unwrap_or_else(|| "tcp://172.31.0.2:2375".into()),
-            ),
-            caddy_admin: Endpoint::parse(&get("CADDY_ADMIN_URL").unwrap_or_else(|| {
-                if gateway_external {
-                    "http://127.0.0.1:2019".into() // Caddy's default admin address
-                } else {
-                    "unix:///run/rustle/caddy-admin.sock".into()
-                }
-            })),
+            master_key_file: path_or("RUSTLE_MASTER_KEY_FILE", "/etc/rustle/master.key"),
+            docker: Endpoint::parse(&str_or("DOCKER_HOST", "tcp://172.31.0.2:2375")),
             gateway_external,
             gateway_names: get("RUSTLE_GATEWAY_NAMES").is_some_and(|v| v == "1"),
             caddy_server: get("RUSTLE_CADDY_SERVER"),
-            admin_upstream,
             public_ip: get("RUSTLE_PUBLIC_IP"),
-            network: get("RUSTLE_NETWORK").unwrap_or_else(|| "rustle-net".into()),
-            cgroup_root: PathBuf::from(
-                get("RUSTLE_CGROUP_ROOT").unwrap_or_else(|| "/sys/fs/cgroup".into()),
-            ),
-            github_api: get("RUSTLE_GITHUB_API").unwrap_or_else(|| "https://api.github.com".into()),
-            release_repo: get("RUSTLE_RELEASE_REPO")
-                .unwrap_or_else(|| "megalabs-dev/rustle".into()),
-            update_pubkey: option_env!("RUSTLE_UPDATE_PUBKEY_HEX").and_then(|h| {
-                let v = hex::decode(h).ok()?;
-                v.try_into().ok()
-            }),
+            network: str_or("RUSTLE_NETWORK", "rustle-net"),
+            cgroup_root: path_or("RUSTLE_CGROUP_ROOT", "/sys/fs/cgroup"),
+            github_api: str_or("RUSTLE_GITHUB_API", "https://api.github.com"),
+            release_repo: str_or("RUSTLE_RELEASE_REPO", "megalabs-dev/rustle"),
+            update_pubkey: option_env!("RUSTLE_UPDATE_PUBKEY_HEX").and_then(parse_pubkey),
             bin_dir: state_dir.join("bin"),
-            proc_root: PathBuf::from(get("RUSTLE_PROC_ROOT").unwrap_or_else(|| "/proc".into())),
-            fake_backends: cfg!(feature = "dev-fakes") && get("RUSTLE_FAKE_BACKENDS").is_some(),
-            real_gateway: cfg!(feature = "dev-fakes")
-                && get("RUSTLE_FAKE_BACKENDS").is_some_and(|v| v == "docker"),
-            fake_container_ip: if cfg!(feature = "dev-fakes") {
-                get("RUSTLE_FAKE_CONTAINER_IP")
-            } else {
-                None
-            },
+            proc_root: path_or("RUSTLE_PROC_ROOT", "/proc"),
+            fake_backends: dev.0,
+            real_gateway: dev.1,
+            fake_container_ip: dev.2,
             state_dir,
         }
     }
@@ -161,6 +142,50 @@ impl Config {
     }
 }
 
+/// `None` when the value is the literal "none", the default when unset, else the value.
+fn optional_or(v: Option<String>, default: &str) -> Option<String> {
+    match v {
+        Some(s) if s == "none" => None,
+        Some(s) => Some(s),
+        None => Some(default.into()),
+    }
+}
+
+fn admin_upstream(explicit: Option<String>, external: bool, socket: &Option<PathBuf>) -> String {
+    if let Some(v) = explicit {
+        return v;
+    }
+    match (external, socket) {
+        (true, _) | (false, None) => "127.0.0.1:3000".into(),
+        (false, Some(p)) => format!("unix/{}", p.display()),
+    }
+}
+
+fn default_caddy_admin(external: bool) -> &'static str {
+    if external {
+        "http://127.0.0.1:2019" // Caddy's default admin address
+    } else {
+        "unix:///run/rustle/caddy-admin.sock"
+    }
+}
+
+fn parse_pubkey(h: &str) -> Option<[u8; 32]> {
+    hex::decode(h).ok()?.try_into().ok()
+}
+
+/// (fake_backends, real_gateway, fake_container_ip): only honoured in `dev-fakes` builds.
+fn dev_flags(get: &impl Fn(&str) -> Option<String>) -> (bool, bool, Option<String>) {
+    if !cfg!(feature = "dev-fakes") {
+        return (false, false, None);
+    }
+    let mode = get("RUSTLE_FAKE_BACKENDS");
+    (
+        mode.is_some(),
+        mode.as_deref() == Some("docker"),
+        get("RUSTLE_FAKE_CONTAINER_IP"),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -176,5 +201,141 @@ mod tests {
         assert!(
             matches!(Endpoint::parse("http://localhost:2019/"), Endpoint::Tcp(s) if s == "localhost:2019")
         );
+    }
+
+    fn cfg_from(pairs: &[(&str, &str)]) -> Config {
+        let m: std::collections::HashMap<String, String> = pairs
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        Config::from_lookup(move |k| m.get(k).cloned())
+    }
+
+    #[test]
+    fn defaults_are_the_managed_layout() {
+        let c = cfg_from(&[]);
+        assert_eq!(c.state_dir, PathBuf::from("/var/lib/rustle"));
+        assert_eq!(c.db_path, PathBuf::from("/var/lib/rustle/rustle.db"));
+        assert_eq!(c.bin_dir, PathBuf::from("/var/lib/rustle/bin"));
+        assert_eq!(
+            c.unix_socket,
+            Some(PathBuf::from("/run/rustle/rustle.sock"))
+        );
+        assert_eq!(c.local_bind.as_deref(), Some("127.0.0.1:3000"));
+        assert_eq!(c.admin_upstream, "unix//run/rustle/rustle.sock");
+        assert!(
+            matches!(&c.caddy_admin, Endpoint::Unix(p) if p.to_str() == Some("/run/rustle/caddy-admin.sock"))
+        );
+        assert!(matches!(&c.docker, Endpoint::Tcp(s) if s == "172.31.0.2:2375"));
+        assert_eq!(c.network, "rustle-net");
+        assert!(!c.gateway_external && !c.gateway_names && c.caddy_server.is_none());
+        assert_eq!(c.proc_root, PathBuf::from("/proc"));
+        assert_eq!(c.cgroup_root, PathBuf::from("/sys/fs/cgroup"));
+        assert_eq!(c.github_api, "https://api.github.com");
+        assert_eq!(c.master_key_file, PathBuf::from("/etc/rustle/master.key"));
+    }
+
+    #[test]
+    fn empty_values_count_as_unset_and_none_disables_listeners() {
+        let c = cfg_from(&[
+            ("RUSTLE_STATE_DIR", ""),
+            ("RUSTLE_SOCKET", "none"),
+            ("RUSTLE_BIND", "none"),
+        ]);
+        assert_eq!(c.state_dir, PathBuf::from("/var/lib/rustle"));
+        assert!(c.unix_socket.is_none() && c.local_bind.is_none());
+        assert_eq!(
+            c.admin_upstream, "127.0.0.1:3000",
+            "no socket: fall back to loopback"
+        );
+        let c = cfg_from(&[
+            ("RUSTLE_SOCKET", "/tmp/x.sock"),
+            ("RUSTLE_BIND", "0.0.0.0:9"),
+        ]);
+        assert_eq!(c.unix_socket, Some(PathBuf::from("/tmp/x.sock")));
+        assert_eq!(c.local_bind.as_deref(), Some("0.0.0.0:9"));
+        assert_eq!(c.admin_upstream, "unix//tmp/x.sock");
+    }
+
+    #[test]
+    fn shared_caddy_mode_changes_the_defaults() {
+        let c = cfg_from(&[
+            ("RUSTLE_GATEWAY", "external"),
+            ("RUSTLE_GATEWAY_NAMES", "1"),
+            ("RUSTLE_CADDY_SERVER", "srv0"),
+        ]);
+        assert!(c.gateway_external && c.gateway_names);
+        assert_eq!(c.caddy_server.as_deref(), Some("srv0"));
+        assert_eq!(c.admin_upstream, "127.0.0.1:3000");
+        assert!(matches!(&c.caddy_admin, Endpoint::Tcp(s) if s == "127.0.0.1:2019"));
+        // explicit settings win over the mode defaults
+        let c = cfg_from(&[
+            ("RUSTLE_GATEWAY", "external"),
+            ("RUSTLE_ADMIN_UPSTREAM", "10.0.0.5:3000"),
+            ("CADDY_ADMIN_URL", "http://caddy:2019"),
+        ]);
+        assert_eq!(c.admin_upstream, "10.0.0.5:3000");
+        assert!(matches!(&c.caddy_admin, Endpoint::Tcp(s) if s == "caddy:2019"));
+        // other values of the switches do not enable anything
+        let c = cfg_from(&[
+            ("RUSTLE_GATEWAY", "internal"),
+            ("RUSTLE_GATEWAY_NAMES", "yes"),
+        ]);
+        assert!(!c.gateway_external && !c.gateway_names);
+    }
+
+    #[test]
+    fn overrides_are_applied() {
+        let c = cfg_from(&[
+            ("RUSTLE_STATE_DIR", "/s"),
+            ("RUSTLE_DB", "/d/x.db"),
+            ("RUSTLE_MASTER_KEY_FILE", "/k"),
+            ("DOCKER_HOST", "unix:///var/run/docker.sock"),
+            ("RUSTLE_NETWORK", "n"),
+            ("RUSTLE_PUBLIC_IP", "1.2.3.4"),
+            ("RUSTLE_PROC_ROOT", "/p"),
+            ("RUSTLE_CGROUP_ROOT", "/c"),
+            ("RUSTLE_GITHUB_API", "http://gh"),
+            ("RUSTLE_RELEASE_REPO", "o/r"),
+        ]);
+        assert_eq!(c.db_path, PathBuf::from("/d/x.db"));
+        assert_eq!(c.bin_dir, PathBuf::from("/s/bin"));
+        assert_eq!(c.master_key_file, PathBuf::from("/k"));
+        assert!(
+            matches!(&c.docker, Endpoint::Unix(p) if p.to_str() == Some("/var/run/docker.sock"))
+        );
+        assert_eq!(
+            (c.network.as_str(), c.public_ip.as_deref()),
+            ("n", Some("1.2.3.4"))
+        );
+        assert_eq!(
+            (c.proc_root, c.cgroup_root),
+            (PathBuf::from("/p"), PathBuf::from("/c"))
+        );
+        assert_eq!(
+            (c.github_api.as_str(), c.release_repo.as_str()),
+            ("http://gh", "o/r")
+        );
+    }
+
+    #[test]
+    fn pubkey_and_dev_flags() {
+        assert_eq!(parse_pubkey(&"ab".repeat(32)), Some([0xab; 32]));
+        assert_eq!(parse_pubkey("abcd"), None);
+        assert_eq!(parse_pubkey("zz"), None);
+        let none = |_: &str| None;
+        assert_eq!(dev_flags(&none), (false, false, None));
+        let docker = |k: &str| match k {
+            "RUSTLE_FAKE_BACKENDS" => Some("docker".to_string()),
+            "RUSTLE_FAKE_CONTAINER_IP" => Some("10.1.1.1".to_string()),
+            _ => None,
+        };
+        if cfg!(feature = "dev-fakes") {
+            assert_eq!(dev_flags(&docker), (true, true, Some("10.1.1.1".into())));
+            let all = |k: &str| (k == "RUSTLE_FAKE_BACKENDS").then(|| "1".to_string());
+            assert_eq!(dev_flags(&all), (true, false, None));
+        } else {
+            assert_eq!(dev_flags(&docker), (false, false, None));
+        }
     }
 }
