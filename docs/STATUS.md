@@ -60,3 +60,9 @@ findings were fixed with tests (see `docs/DECISIONS_ADDENDUM.md`). Known leftove
 * A one-shot container orphaned by a restart is swept once it has exited; a hung one keeps its RAM until the next boot.
 * `compat_caps` and per-site resource edits take effect on the next deploy (the UI says so).
 * Tenant containers can still reach each other on `rustle-net`.
+
+## Migration from a site-ctl.sh setup
+
+`rustle import-site-ctl`, HTTP cron jobs and route headers are implemented and unit-tested. Not supported: `www` redirects, the
+persistent `.next/cache` volume, custom health-check paths (see `docs/COEXISTENCE.md`).
+

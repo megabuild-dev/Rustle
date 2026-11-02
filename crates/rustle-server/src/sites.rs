@@ -128,17 +128,21 @@ fn aad(site_id: &str, key: &str) -> String {
     format!("env:{site_id}:{key}")
 }
 
+/// Encrypt variables for storage; each value is bound to its site and key.
+pub fn seal_env(
+    key: &crate::crypto::MasterKey,
+    site_id: &str,
+    vars: &[EnvVar],
+) -> Vec<(String, Vec<u8>)> {
+    vars.iter()
+        .map(|v| (v.key.clone(), key.seal_str(&v.value, &aad(site_id, &v.key))))
+        .collect()
+}
+
 pub fn store_env(state: &AppState, site_id: &str, vars: &[EnvVar]) -> AppResult<()> {
-    let enc: Vec<(String, Vec<u8>)> = vars
-        .iter()
-        .map(|v| {
-            (
-                v.key.clone(),
-                state.key.seal_str(&v.value, &aad(site_id, &v.key)),
-            )
-        })
-        .collect();
-    state.store.replace_env(site_id, &enc)
+    state
+        .store
+        .replace_env(site_id, &seal_env(&state.key, site_id, vars))
 }
 
 pub fn load_env(state: &AppState, site_id: &str) -> AppResult<Vec<EnvVar>> {

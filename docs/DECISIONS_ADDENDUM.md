@@ -30,4 +30,7 @@ Made during implementation after review by an independent senior reviewer; each 
 | Shared Caddy | not covered (Rustle always ran its own Caddy) | `RUSTLE_GATEWAY=external` (installer: `--use-existing-caddy`): route-by-`@id` only, never a whole-config load, server autodetected, containers reached by IP re-checked every minute, no route before the first deploy, dashboard exposed only with a domain | Servers that already run sites behind a Caddy (docs/COEXISTENCE.md) |
 | Shared Caddy as a container | n/a | `RUSTLE_GATEWAY_NAMES=1`: the Caddy joins `rustle-net` and is given container names; its admin API moves to a unix socket (unreachable from tenants); SIGHUP and a 15 s poll restore routes after the owner's `caddy reload` | A container Caddy cannot reach container IPs (separate bridges) and a TCP admin API on a shared network would be open to tenants |
 | Static-export sites | Node-only Dockerfile template | extra `Dockerfile` template (Caddy serving `out/`) | Static sites need about 64 MB, not a Node process |
+| Importing an existing setup | n/a | `rustle import-site-ctl <dir>` (site-ctl.sh directories) | Moving by hand is error-prone: env files, RAM rounding, cron lines |
+| Cron | argv one-shot containers only | also HTTP jobs: `GET <path>` on the running site with `Authorization: Bearer $CRON_SECRET` from the site's env | Vercel-style cron routes are how many Next.js sites schedule work |
+| Site routes | proxy only | add HSTS/nosniff/referrer headers, remove `Server`, zstd/gzip | Parity with a typical shared `(common)` Caddy snippet |
 

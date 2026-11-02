@@ -10,6 +10,8 @@ USAGE:
   rustle restore <file> [--force] restore an encrypted backup into the configured database
   rustle key export              print the master key (store it somewhere safe)
   rustle caddy-config            print the initial Caddy JSON configuration
+  rustle import-site-ctl <dir> [--dry-run]
+                                 import the sites of a site-ctl.sh directory (~/apps): env, cron, domain, RAM
   rustle version
 
 Configuration is read from environment variables (see docs/DEV.md).";
@@ -110,6 +112,34 @@ fn main() -> ExitCode {
             match cli::key_export(&cfg) {
                 Ok(k) => {
                     println!("{k}");
+                    ExitCode::SUCCESS
+                }
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    ExitCode::from(1)
+                }
+            }
+        }
+        Some("import-site-ctl") => {
+            let Some(dir) = args.get(1).filter(|a| !a.starts_with("--")) else {
+                eprintln!("usage: rustle import-site-ctl <dir> [--dry-run]");
+                return ExitCode::from(2);
+            };
+            let dry = args.iter().any(|a| a == "--dry-run");
+            match cli::import_site_ctl(&cfg, std::path::Path::new(dir), dry) {
+                Ok(r) => {
+                    println!("{}", r.lines.join("\n"));
+                    println!(
+                        "\n{} {}, {} skipped.{}",
+                        r.imported,
+                        if dry { "would be imported" } else { "imported" },
+                        r.skipped,
+                        if dry {
+                            ""
+                        } else {
+                            " Open the dashboard to add a deploy token to each site and switch its workflow; traffic moves on the first deploy."
+                        }
+                    );
                     ExitCode::SUCCESS
                 }
                 Err(e) => {

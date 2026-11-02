@@ -15,12 +15,22 @@ use std::time::Duration;
 pub fn build_state(cfg: Config, key: MasterKey, store: Store) -> Arc<AppState> {
     if cfg.fake_backends {
         tracing::warn!("running with FAKE Docker/Caddy/GitHub backends (dev-fakes)");
+        let gateway: Arc<dyn Gateway> = if cfg.real_gateway {
+            Arc::new(HttpGateway::with_options(
+                Target::from(&cfg.caddy_admin),
+                cfg.gateway_external,
+                cfg.caddy_server.clone(),
+            ))
+        } else {
+            Arc::new(FakeGateway::new())
+        };
+        let runtime = Arc::new(FakeRuntime::with_fixed_ip(cfg.fake_container_ip.clone()));
         return AppState::with_backends(
             cfg,
             store,
             key,
-            Arc::new(FakeRuntime::new()),
-            Arc::new(FakeGateway::new()),
+            runtime,
+            gateway,
             Arc::new(FakeHealth::new(true)),
             Arc::new(FakeResolver::default()),
             Arc::new(FakeGithub::new()),

@@ -615,11 +615,18 @@ struct FakeState {
 #[derive(Default)]
 pub struct FakeRuntime {
     st: Mutex<FakeState>,
+    fixed_ip: Mutex<Option<String>>,
 }
 
 impl FakeRuntime {
     pub fn new() -> Self {
         Self::default()
+    }
+    /// Every container created from now on reports this address (local end-to-end tests).
+    pub fn with_fixed_ip(ip: Option<String>) -> Self {
+        let r = Self::default();
+        *r.fixed_ip.lock().unwrap() = ip;
+        r
     }
     pub fn calls(&self) -> Vec<String> {
         self.st.lock().unwrap().calls.clone()
@@ -766,7 +773,12 @@ impl Runtime for FakeRuntime {
         assert_eq!(body["HostConfig"]["Privileged"], json!(false));
         s.counter += 1;
         let id = format!("fake{:04}", s.counter);
-        let ip = format!("10.0.0.{}", s.counter);
+        let ip = self
+            .fixed_ip
+            .lock()
+            .unwrap()
+            .clone()
+            .unwrap_or_else(|| format!("10.0.0.{}", s.counter));
         s.containers.insert(
             id.clone(),
             FakeContainer {

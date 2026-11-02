@@ -25,6 +25,8 @@ pub fn CronPage() -> impl IntoView {
         RwSignal::new(String::new()),
     );
 
+    let http_mode = RwSignal::new(false);
+    let http_path = RwSignal::new(String::new());
     let add = move |_| {
         let args: Vec<String> = argv
             .get_untracked()
@@ -32,11 +34,13 @@ pub fn CronPage() -> impl IntoView {
             .map(|l| l.to_string())
             .filter(|l| !l.is_empty())
             .collect();
+        let http = http_mode.get_untracked();
         let req = CreateCronReq {
             name: name.get_untracked(),
             schedule: sched.get_untracked(),
             site_id: site.get_untracked(),
-            argv: args,
+            argv: if http { vec![] } else { args },
+            http_path: http.then(|| http_path.get_untracked()),
         };
         spawn_local(async move {
             match api::call::<CronJobDto>("POST", "/api/v1/cron", js_json(&req)).await {
@@ -63,7 +67,7 @@ pub fn CronPage() -> impl IntoView {
                             let (id1, id2, id3, id4) = (j.id.clone(), j.id.clone(), j.id.clone(), j.id.clone());
                             let enabled = j.enabled;
                             let is_site = j.kind == "site";
-                            let argv_txt = j.argv.clone().map(|a| a.join(" ")).unwrap_or_default();
+                            let argv_txt = j.argv.clone().map(|a| a.join(" ")).map(|a| if j.kind == "http" { format!("GET {a}") } else { a }).unwrap_or_default();
                             view! {
                                 <tr>
                                     <td><div>{j.name.clone()}</div>{(!argv_txt.is_empty()).then(|| view! { <div class="mono muted small">{argv_txt.clone()}</div> })}</td>
@@ -130,8 +134,15 @@ pub fn CronPage() -> impl IntoView {
                     {move || sites.get().unwrap_or_default().into_iter().map(|s| view! { <option value=s.id.clone()>{s.name.clone()}</option> }).collect_view()}
                 </select>
                 <label>"Schedule (cron, UTC)"</label><input class="mono" prop:value=move || sched.get() on:input=move |e| sched.set(event_target_value(&e))/>
+                <label class="check"><input type="checkbox" prop:checked=move || http_mode.get() on:change=move |e| http_mode.set(event_target_checked(&e))/>" Call a path of the running site instead of running a command (sends Authorization: Bearer $CRON_SECRET when the site defines CRON_SECRET)"</label>
+                <Show when=move || http_mode.get()>
+                    <label>"Path"</label>
+                    <input class="mono" placeholder="/api/cron/cleanup" prop:value=move || http_path.get() on:input=move |e| http_path.set(event_target_value(&e))/>
+                </Show>
+                <Show when=move || !http_mode.get()>
                 <label>"Command, one argument per line"</label>
                 <textarea class="mono" rows="3" placeholder="node\nscripts/cleanup.js" prop:value=move || argv.get() on:input=move |e| argv.set(event_target_value(&e))></textarea>
+                </Show>
                 <button class="primary" on:click=add>"Create job"</button>
             </div>
         </div>

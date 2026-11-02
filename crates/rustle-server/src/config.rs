@@ -55,6 +55,10 @@ pub struct Config {
     pub bin_dir: PathBuf,
     pub proc_root: PathBuf,
     pub fake_backends: bool,
+    /// With `dev-fakes`: keep the real Caddy gateway and fake only Docker/GitHub/DNS.
+    pub real_gateway: bool,
+    /// With `dev-fakes`: every fake container reports this IP (so a local test server can stand in for it).
+    pub fake_container_ip: Option<String>,
 }
 
 impl Config {
@@ -117,6 +121,13 @@ impl Config {
             bin_dir: state_dir.join("bin"),
             proc_root: PathBuf::from(get("RUSTLE_PROC_ROOT").unwrap_or_else(|| "/proc".into())),
             fake_backends: cfg!(feature = "dev-fakes") && get("RUSTLE_FAKE_BACKENDS").is_some(),
+            real_gateway: cfg!(feature = "dev-fakes")
+                && get("RUSTLE_FAKE_BACKENDS").is_some_and(|v| v == "docker"),
+            fake_container_ip: if cfg!(feature = "dev-fakes") {
+                get("RUSTLE_FAKE_CONTAINER_IP")
+            } else {
+                None
+            },
             state_dir,
         }
     }
@@ -144,6 +155,8 @@ impl Config {
             bin_dir: dir.join("bin"),
             proc_root: dir.join("proc"),
             fake_backends: true,
+            real_gateway: false,
+            fake_container_ip: None,
         }
     }
 }

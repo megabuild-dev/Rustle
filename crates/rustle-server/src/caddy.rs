@@ -49,11 +49,28 @@ pub fn admin_route(p: &BaseParams) -> Value {
     r
 }
 
+/// Response headers and compression applied to every site, the equivalent of a typical
+/// `(common)` Caddyfile snippet, so a site moved to Rustle keeps its HSTS and friends.
+fn common_handlers() -> [Value; 2] {
+    [
+        json!({
+            "handler": "headers",
+            "response": { "set": {
+                "Strict-Transport-Security": ["max-age=31536000"],
+                "X-Content-Type-Options": ["nosniff"],
+                "Referrer-Policy": ["strict-origin-when-cross-origin"],
+            }, "delete": ["Server"] }
+        }),
+        json!({ "handler": "encode", "encodings": { "zstd": {}, "gzip": {} }, "prefer": ["zstd", "gzip"] }),
+    ]
+}
+
 pub fn site_route(name: &str, domain: &str, dial: &str) -> Value {
+    let [headers, encode] = common_handlers();
     json!({
         "@id": format!("site-{name}"),
         "match": [{ "host": [domain] }],
-        "handle": [proxy_handler(&format!("up-{name}"), dial)],
+        "handle": [headers, encode, proxy_handler(&format!("up-{name}"), dial)],
         "terminal": true
     })
 }
@@ -519,9 +536,16 @@ mod tests {
         let body = put.json();
         assert_eq!(body["@id"], "site-blog");
         assert_eq!(body["match"][0]["host"][0], "blog.example.com");
-        assert_eq!(body["handle"][0]["@id"], "up-blog");
+        // headers and compression first, the proxy last
+        assert_eq!(body["handle"][0]["handler"], "headers");
         assert_eq!(
-            body["handle"][0]["upstreams"][0]["dial"],
+            body["handle"][0]["response"]["set"]["Strict-Transport-Security"][0],
+            "max-age=31536000"
+        );
+        assert_eq!(body["handle"][1]["handler"], "encode");
+        assert_eq!(body["handle"][2]["@id"], "up-blog");
+        assert_eq!(
+            body["handle"][2]["upstreams"][0]["dial"],
             "rustle-blog-abc:3000"
         );
     }

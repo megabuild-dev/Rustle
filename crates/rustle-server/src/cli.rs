@@ -134,6 +134,239 @@ pub fn caddy_config(cfg: &Config) -> Result<String, String> {
     serde_json::to_string_pretty(&base_config(&p)).map_err(|e| e.to_string())
 }
 
+// ---- import from a site-ctl style directory -----------------------------------------------------
+
+#[derive(Debug, Default)]
+pub struct ImportReport {
+    pub lines: Vec<String>,
+    pub imported: usize,
+    pub skipped: usize,
+}
+
+fn meta_value(meta: &str, key: &str) -> Option<String> {
+    meta.lines()
+        .find_map(|l| l.strip_prefix(&format!("{key}=")))
+        .map(|v| v.trim().to_string())
+}
+
+/// `KEY=VALUE` lines of an env file. Comments, blanks and a leading `export ` are ignored; one pair of
+/// surrounding quotes is removed; the last definition of a key wins.
+pub fn parse_env_file(text: &str) -> Vec<rustle_types::EnvVar> {
+    let mut out: Vec<rustle_types::EnvVar> = Vec::new();
+    for line in text.lines() {
+        let line = line.trim_start();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line);
+        let Some((k, v)) = line.split_once('=') else {
+            continue;
+        };
+        let k = k.trim();
+        if !crate::util::valid_env_key(k) {
+            continue;
+        }
+        let v = v.trim_end_matches(['\r', '\n']);
+        let v = match (v.chars().next(), v.chars().last()) {
+            (Some(a), Some(b)) if v.len() >= 2 && (a == '"' || a == '\'') && a == b => {
+                &v[1..v.len() - 1]
+            }
+            _ => v,
+        };
+        out.retain(|e| e.key != k);
+        out.push(rustle_types::EnvVar {
+            key: k.to_string(),
+            value: v.to_string(),
+        });
+    }
+    out
+}
+
+/// Import the sites of a `site-ctl.sh` directory (`sites.d/*.meta`, `sites.d/*.yml`, `env/*.env`,
+/// `cron.d/*.cron`) into Rustle. Sites are created without touching traffic; each one goes live on its
+/// first deploy. Run it after `rustle init`, as the user that owns the database.
+pub fn import_site_ctl(
+    cfg: &Config,
+    dir: &std::path::Path,
+    dry_run: bool,
+) -> Result<ImportReport, String> {
+    use crate::store::{CronRow, SiteRow};
+    use crate::util::{now, rand_hex, valid_domain, valid_site_name};
+    let sites_d = dir.join("sites.d");
+    if !sites_d.is_dir() {
+        return Err(format!(
+            "{} has no sites.d directory: is this a site-ctl directory?",
+            dir.display()
+        ));
+    }
+    let key = MasterKey::load(&cfg.master_key_file, false)
+        .map_err(|e| format!("master key: {e} (run `rustle init` first)"))?;
+    let store = Store::open(&cfg.db_path).map_err(|e| e.message)?;
+    if store.admin().map_err(|e| e.message)?.is_none() {
+        return Err("not initialized: run `rustle init` first".into());
+    }
+    let mut metas: Vec<_> = std::fs::read_dir(&sites_d)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|x| x == "meta"))
+        .collect();
+    metas.sort();
+    let mut rep = ImportReport::default();
+    for meta_path in metas {
+        let name = meta_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("")
+            .to_string();
+        let note = |rep: &mut ImportReport, m: String| rep.lines.push(format!("  {m}"));
+        rep.lines.push(format!("{name}:"));
+        let meta = std::fs::read_to_string(&meta_path).map_err(|e| e.to_string())?;
+        let yml = std::fs::read_to_string(sites_d.join(format!("{name}.yml"))).unwrap_or_default();
+        let image = yml
+            .lines()
+            .find_map(|l| l.trim().strip_prefix("image:"))
+            .map(|v| v.trim().to_string())
+            .unwrap_or_default();
+        let domain = meta_value(&meta, "DOMAIN")
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        let mem: u32 = meta_value(&meta, "MEM")
+            .and_then(|m| m.parse().ok())
+            .unwrap_or(256);
+        let skip = |rep: &mut ImportReport, why: String| {
+            rep.skipped += 1;
+            rep.lines.push(format!("  SKIPPED: {why}"));
+        };
+        if !valid_site_name(&name) {
+            skip(&mut rep, "the name is not valid in Rustle (letters, digits and dashes, no leading or trailing dash)".into());
+            continue;
+        }
+        if !valid_domain(&domain) {
+            skip(&mut rep, format!("invalid domain '{domain}'"));
+            continue;
+        }
+        let repo = match crate::imageref::ImageRef::parse(&image) {
+            Ok(r) if r.is_ghcr() => r.repo_key(),
+            Ok(r) => {
+                skip(
+                    &mut rep,
+                    format!(
+                        "image '{image}' is on {}; only ghcr.io images are supported",
+                        r.host
+                    ),
+                );
+                continue;
+            }
+            Err(e) => {
+                skip(&mut rep, format!("cannot read the image ('{image}'): {e}"));
+                continue;
+            }
+        };
+        let ram = mem.div_ceil(32).saturating_mul(32).clamp(64, 512);
+        if ram != mem {
+            note(
+                &mut rep,
+                format!("RAM {mem} MB becomes {ram} MB (Rustle uses steps of 32, 64 to 512)"),
+            );
+        }
+        let env_text = std::fs::read_to_string(dir.join("env").join(format!("{name}.env")))
+            .unwrap_or_default();
+        let vars = parse_env_file(&env_text);
+        if meta_value(&meta, "WWW").is_some_and(|w| w != "0") {
+            note(&mut rep, "WARNING: the www redirect is not supported by Rustle yet; keep it in your Caddyfile".into());
+        }
+        if meta_value(&meta, "CACHE").is_some_and(|c| c == "1") {
+            note(&mut rep, "WARNING: the persistent .next/cache volume is not supported (Rustle runs stateless containers); the cache is rebuilt after each deploy".into());
+        }
+        if meta_value(&meta, "HEALTH").is_some_and(|h| h != "/") {
+            note(
+                &mut rep,
+                "WARNING: Rustle checks health on '/', not on your custom path".into(),
+            );
+        }
+        let cron_text = std::fs::read_to_string(dir.join("cron.d").join(format!("{name}.cron")))
+            .unwrap_or_default();
+        let mut crons: Vec<(String, String)> = Vec::new();
+        for l in cron_text.lines().filter(|l| !l.trim().is_empty()) {
+            match l.split_once('\t') {
+                Some((s, p))
+                    if crate::cron::CronExpr::parse(s).is_ok()
+                        && crate::jobs::validate_http_path(p.trim()).is_ok() =>
+                {
+                    crons.push((s.trim().to_string(), p.trim().to_string()))
+                }
+                _ => note(
+                    &mut rep,
+                    format!("WARNING: ignored an unreadable cron line: {l}"),
+                ),
+            }
+        }
+        if !crons.is_empty() && !vars.iter().any(|v| v.key == "CRON_SECRET") {
+            note(&mut rep, "WARNING: the site has cron jobs but no CRON_SECRET in its env file; they will be called without a bearer token".into());
+        }
+        note(
+            &mut rep,
+            format!(
+                "{domain}  {repo}  {ram} MB  {} env vars  {} cron jobs",
+                vars.len(),
+                crons.len()
+            ),
+        );
+        if dry_run {
+            rep.imported += 1;
+            continue;
+        }
+        let t = now();
+        let row = SiteRow {
+            id: rand_hex(6),
+            name: name.clone(),
+            domain: domain.clone(),
+            image_repo: repo,
+            container_port: 3000,
+            ram_limit_mb: ram,
+            status: "created".into(),
+            current_deployment_id: None,
+            registry_id: None,
+            zero_downtime: false,
+            compat_caps: false,
+            created_at: t,
+            updated_at: t,
+        };
+        if let Err(e) = store.insert_site(&row) {
+            skip(
+                &mut rep,
+                format!(
+                    "could not create it ({}): it may already exist in Rustle",
+                    e.message
+                ),
+            );
+            continue;
+        }
+        store
+            .replace_env(&row.id, &crate::sites::seal_env(&key, &row.id, &vars))
+            .map_err(|e| e.message)?;
+        for (i, (sched, path)) in crons.iter().enumerate() {
+            store
+                .insert_cron(&CronRow {
+                    id: rand_hex(6),
+                    kind: "http".into(),
+                    name: format!("{name} cron {}", i + 1),
+                    schedule: sched.clone(),
+                    site_id: Some(row.id.clone()),
+                    argv_json: Some(serde_json::to_string(&[path]).map_err(|e| e.to_string())?),
+                    enabled: true,
+                    system_key: None,
+                    last_fired_minute: None,
+                })
+                .map_err(|e| e.message)?;
+        }
+        store.audit(t, "cli", "site.import", &name);
+        rep.imported += 1;
+    }
+    Ok(rep)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,6 +470,144 @@ mod tests {
         let j: serde_json::Value = serde_json::from_str(&caddy_config(&c).unwrap()).unwrap();
         assert!(j["admin"]["listen"].as_str().unwrap().starts_with("unix/"));
         assert!(j["apps"]["http"]["servers"]["main"]["routes"][0]["@id"] == "admin");
+    }
+
+    fn write(p: &std::path::Path, text: &str) {
+        std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+        std::fs::write(p, text).unwrap();
+    }
+
+    fn fixture(d: &std::path::Path) {
+        let a = d.join("apps");
+        write(
+            &a.join("sites.d/blog.meta"),
+            "DOMAIN=Blog.Example.com\nWWW=1\nMEM=220\nCACHE=1\nHEALTH=/api/health\n",
+        );
+        write(
+            &a.join("sites.d/blog.yml"),
+            "  blog:\n    image: ghcr.io/acme/blog:abc123\n    restart: unless-stopped\n",
+        );
+        write(&a.join("env/blog.env"), "# comment\nNODE_ENV=production\nexport CRON_SECRET=\"s3cret\"\nBAD KEY=x\nA='q'\nA=last\n");
+        write(
+            &a.join("cron.d/blog.cron"),
+            "*/5 * * * *\t/api/cron/sync\nnot a cron line\n",
+        );
+        write(
+            &a.join("sites.d/docs.meta"),
+            "DOMAIN=docs.example.com\nWWW=0\nMEM=64\nCACHE=0\nHEALTH=/\n",
+        );
+        write(
+            &a.join("sites.d/docs.yml"),
+            "  docs:\n    image: ghcr.io/acme/docs:1\n",
+        );
+        write(
+            &a.join("sites.d/legacy.meta"),
+            "DOMAIN=old.example.com\nMEM=128\n",
+        );
+        write(
+            &a.join("sites.d/legacy.yml"),
+            "  legacy:\n    image: registry.example.com/acme/legacy:1\n",
+        );
+    }
+
+    #[test]
+    fn env_file_parsing() {
+        let v = parse_env_file("# c\n\nA=1\nexport B=\"two words\"\nC='x'\n1BAD=no\nD=a=b\nA=2\n");
+        let m: std::collections::BTreeMap<_, _> = v
+            .iter()
+            .map(|e| (e.key.as_str(), e.value.as_str()))
+            .collect();
+        assert_eq!(m["A"], "2", "last definition wins");
+        assert_eq!(m["B"], "two words");
+        assert_eq!(m["C"], "x");
+        assert_eq!(m["D"], "a=b", "only the first '=' splits");
+        assert!(!m.contains_key("1BAD"));
+    }
+
+    #[test]
+    fn imports_a_site_ctl_directory_without_touching_traffic() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cfg(&d.path().join("state"));
+        std::fs::create_dir_all(d.path().join("state")).unwrap();
+        init(&c, false).unwrap();
+        fixture(d.path());
+        let dir = d.path().join("apps");
+        // a dry run reports and writes nothing
+        let dry = import_site_ctl(&c, &dir, true).unwrap();
+        assert_eq!((dry.imported, dry.skipped), (2, 1));
+        assert!(Store::open(&c.db_path)
+            .unwrap()
+            .list_sites()
+            .unwrap()
+            .is_empty());
+        let rep = import_site_ctl(&c, &dir, false).unwrap();
+        let text = rep.lines.join("\n");
+        assert_eq!((rep.imported, rep.skipped), (2, 1), "{text}");
+        assert!(text.contains("220 MB becomes 224 MB"), "{text}");
+        assert!(
+            text.contains("www redirect")
+                && text.contains("cache volume")
+                && text.contains("custom path")
+                || text.contains("health on '/'"),
+            "{text}"
+        );
+        assert!(
+            text.contains("registry.example.com") && text.contains("SKIPPED"),
+            "{text}"
+        );
+        assert!(text.contains("unreadable cron line"), "{text}");
+        let st = Store::open(&c.db_path).unwrap();
+        let blog = st.get_site_by_name("blog").unwrap().unwrap();
+        assert_eq!(
+            (
+                blog.domain.as_str(),
+                blog.image_repo.as_str(),
+                blog.ram_limit_mb
+            ),
+            ("blog.example.com", "ghcr.io/acme/blog", 224)
+        );
+        assert_eq!(
+            blog.status, "created",
+            "no deployment, so no traffic is touched"
+        );
+        // env is sealed with the site's key and can be read back
+        let key = MasterKey::load(&c.master_key_file, false).unwrap();
+        let env: std::collections::BTreeMap<String, String> = st
+            .list_env(&blog.id)
+            .unwrap()
+            .into_iter()
+            .map(|(k, blob)| {
+                (
+                    k.clone(),
+                    key.open_str(&blob, &format!("env:{}:{k}", blog.id))
+                        .unwrap(),
+                )
+            })
+            .collect();
+        assert_eq!(env["CRON_SECRET"], "s3cret");
+        assert_eq!(env["A"], "last");
+        assert!(!env.contains_key("BAD KEY"));
+        // cron lines become HTTP jobs
+        let jobs: Vec<_> = st
+            .list_cron()
+            .unwrap()
+            .into_iter()
+            .filter(|j| j.kind == "http")
+            .collect();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(
+            (jobs[0].schedule.as_str(), jobs[0].argv_json.as_deref()),
+            ("*/5 * * * *", Some("[\"/api/cron/sync\"]"))
+        );
+        // running it again is harmless: existing sites are skipped, not duplicated
+        let again = import_site_ctl(&c, &dir, false).unwrap();
+        assert_eq!(again.imported, 0);
+        assert_eq!(
+            Store::open(&c.db_path).unwrap().list_sites().unwrap().len(),
+            2
+        );
+        // not a site-ctl directory
+        assert!(import_site_ctl(&c, d.path(), true).is_err());
     }
 
     #[test]

@@ -42,4 +42,10 @@ through the rest on a fresh Ubuntu 24.04 VPS (1 vCPU / 1 GB).
 | 34 | The Caddy container, joined to `rustle-net`, resolves Rustle container names and reaches the dashboard through `unix//run/rustle/rustle.sock` | open a migrated site and the dashboard domain | n/a |
 | 35 | `systemctl kill -s HUP rustle` after `caddy reload` restores routes immediately; no SIGHUP before the handler is installed can kill Rustle | reload, then request a Rustle-managed domain | n/a |
 | 36 | A static-export image (`FROM caddy:2-alpine`, listens on 3000) runs under `cap_drop=ALL`, `no-new-privileges` and a 64 MB limit and passes the health check | deploy `Dockerfile.static.tmpl`'s image | Enable `compat_caps` for that site |
+| 37 | The global `admin unix//...|0666` block placed first in the generated Caddyfile validates (`caddy validate`) next to `import /etc/caddy/sites.d/*.caddy` and the `(common)` snippet | `./site-ctl.sh regen`, `caddy validate` | Fix the block order |
+| 38 | `networks:` before `volumes:` in `compose.tail.yml` leaves the appended `sites.d/*.vols` lines under `volumes:` and `docker compose config -q` passes | `./site-ctl.sh regen` | Move the block |
+| 39 | `reload_caddy` keeps its non-zero status on a failed reload and the `HUP` line never changes it | break the Caddyfile on purpose, run `./site-ctl.sh live <name>` | n/a |
+| 40 | Rustle-managed routes get the same headers/compression as `(common)` | `curl -sI https://<migrated-site>` (HSTS, no `Server`, `Content-Encoding`) | Adjust `common_handlers` |
+| 41 | `rustle import-site-ctl ~/apps --dry-run` on the real directory reads every site | run it | send the unreadable file |
+| 42 | An HTTP cron job reaches a running site and sends the Bearer secret | create one, "Run now", read the history | n/a |
 

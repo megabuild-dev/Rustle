@@ -85,18 +85,32 @@ pub fn create_site_job(state: &AppState, req: CreateCronReq) -> AppResult<CronJo
         return Err(AppError::bad_request("name is required (max 80 chars)"));
     }
     CronExpr::parse(&req.schedule).map_err(|e| AppError::bad_request(e.to_string()))?;
-    validate_argv(&req.argv)?;
+    let (kind, payload) = match (&req.http_path, req.argv.is_empty()) {
+        (Some(p), true) => {
+            validate_http_path(p)?;
+            ("http", vec![p.clone()])
+        }
+        (None, false) => {
+            validate_argv(&req.argv)?;
+            ("site", req.argv.clone())
+        }
+        _ => {
+            return Err(AppError::bad_request(
+                "give either a command (argv) or an http_path, not both or neither",
+            ))
+        }
+    };
     state
         .store
         .get_site(&req.site_id)?
         .ok_or_else(|| AppError::bad_request("unknown site_id"))?;
     let row = CronRow {
         id: rand_hex(6),
-        kind: "site".into(),
+        kind: kind.into(),
         name: req.name.trim().into(),
         schedule: req.schedule.trim().into(),
         site_id: Some(req.site_id),
-        argv_json: Some(serde_json::to_string(&req.argv).map_err(AppError::internal)?),
+        argv_json: Some(serde_json::to_string(&payload).map_err(AppError::internal)?),
         enabled: true,
         system_key: None,
         last_fired_minute: None,
@@ -154,6 +168,7 @@ pub async fn run_job(state: Arc<AppState>, job: CronRow) {
             Ok(msg) => (Some(0), msg),
             Err(msg) => (Some(1), msg),
         },
+        "http" => run_http_job(&state, &job).await,
         _ => run_site_job(&state, &job).await,
     };
     let _ = state
@@ -279,6 +294,93 @@ pub async fn prune_images(state: &AppState) -> Result<PruneResp, String> {
     })
 }
 
+pub fn validate_http_path(p: &str) -> AppResult<()> {
+    let ok = p.len() <= 256
+        && p.starts_with('/')
+        && !p.starts_with("//")
+        && p.bytes()
+            .all(|c| c.is_ascii_alphanumeric() || b"._/~?&=%-".contains(&c));
+    if ok {
+        Ok(())
+    } else {
+        Err(AppError::bad_request(
+            "http_path must start with a single '/' and use only letters, digits and ._/~?&=%-",
+        ))
+    }
+}
+
+/// `GET <path>` against a running site. The body is bounded; a 2xx answer is a success.
+pub async fn call_site_http(
+    target: &crate::httpc::Target,
+    path: &str,
+    secret: Option<&str>,
+) -> (Option<i64>, String) {
+    let mut req = crate::httpc::Req::get(path);
+    if let Some(s) = secret {
+        req = req.header("authorization", format!("Bearer {s}"));
+    }
+    match crate::httpc::send_capped(target, &req, std::time::Duration::from_secs(60), 8 * 1024)
+        .await
+    {
+        Ok((resp, _)) => {
+            let ok = (200..300).contains(&resp.status);
+            (
+                Some(if ok { 0 } else { 1 }),
+                format!("{} {}", resp.status, resp.text()),
+            )
+        }
+        Err(e) => (Some(1), format!("request failed: {e}")),
+    }
+}
+
+async fn run_http_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) {
+    let fail = |m: &str| (Some(-1), m.to_string());
+    let Some(site) = job
+        .site_id
+        .as_deref()
+        .and_then(|s| state.store.get_site(s).ok().flatten())
+    else {
+        return fail("site no longer exists");
+    };
+    let Some(path) = job
+        .argv_json
+        .as_deref()
+        .and_then(|j| serde_json::from_str::<Vec<String>>(j).ok())
+        .and_then(|v| v.into_iter().next())
+    else {
+        return fail("job has no path");
+    };
+    if validate_http_path(&path).is_err() {
+        return fail("job has an invalid path");
+    }
+    let Some(cid) = site
+        .current_deployment_id
+        .as_deref()
+        .and_then(|d| state.store.get_deployment(d).ok().flatten())
+        .and_then(|d| d.container_id)
+    else {
+        return fail("skipped: site has no deployment");
+    };
+    let ip = match state.runtime.inspect(&cid).await {
+        Ok(i) if i.running => i.ip,
+        _ => None,
+    };
+    let Some(ip) = ip else {
+        return fail("skipped: site is not running");
+    };
+    let secret = load_env(state, &site.id).ok().and_then(|v| {
+        v.into_iter()
+            .find(|e| e.key == "CRON_SECRET")
+            .map(|e| e.value)
+    });
+    call_site_http(
+        &crate::httpc::Target::Tcp(format!("{ip}:{}", site.container_port)),
+        &path,
+        secret.as_deref(),
+    )
+    .await
+}
+
 async fn run_site_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) {
     let fail = |m: &str| (Some(-1), m.to_string());
     let Some(site) = job
@@ -377,6 +479,7 @@ mod tests {
     use super::*;
     use crate::app::TestEnv;
     use crate::deploy::webhook;
+    use crate::docker::Runtime;
     use crate::sites::create_site;
     use rustle_types::{CreateSiteReq, EnvVar};
 
@@ -590,6 +693,59 @@ mod tests {
         e.state.deployer.wait_idle(&site.id).await;
     }
 
+    #[test]
+    fn http_paths() {
+        for ok in ["/api/cron/cleanup", "/a?x=1&y=2", "/", "/a-b_c.d~e%20"] {
+            assert!(validate_http_path(ok).is_ok(), "{ok}");
+        }
+        for bad in [
+            "api",
+            "//evil.com/x",
+            "/a b",
+            "/a\r\nHost: x",
+            "/a;rm",
+            &format!("/{}", "a".repeat(300)),
+            "",
+        ] {
+            assert!(validate_http_path(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[tokio::test]
+    async fn http_job_sends_the_bearer_secret_and_reports_the_status() {
+        use crate::testutil::MockHttp;
+        let m = MockHttp::start(|r| {
+            if r.header("authorization").as_deref() == Some("Bearer s3cret") {
+                (200, vec![], "{\"cleaned\":3}".into())
+            } else {
+                (401, vec![], "nope".into())
+            }
+        })
+        .await;
+        let t = crate::httpc::Target::Tcp(m.addr.clone());
+        let (code, log) = call_site_http(&t, "/api/cron/x", Some("s3cret")).await;
+        assert_eq!((code, log.as_str()), (Some(0), "200 {\"cleaned\":3}"));
+        let (code, log) = call_site_http(&t, "/api/cron/x", None).await;
+        assert_eq!((code, log.as_str()), (Some(1), "401 nope"));
+        assert_eq!(m.requests()[0].method, "GET");
+        let (code, _) =
+            call_site_http(&crate::httpc::Target::Tcp("127.0.0.1:1".into()), "/", None).await;
+        assert_eq!(code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn http_job_skips_a_site_that_is_not_running() {
+        let e = TestEnv::new();
+        let site = deployed_site(&e).await;
+        let cid = e.runtime.containers()[0].id.clone();
+        e.runtime.stop(&cid, 1).await.unwrap();
+        let mut j = job(&site.id, &["/api/cron/x"]);
+        j.kind = "http".into();
+        let (code, log) = run_http_job(&e.state, &j).await;
+        assert_eq!(code, Some(-1));
+        assert!(log.starts_with("skipped"), "{log}");
+    }
+
     #[tokio::test]
     async fn create_site_job_validates() {
         let e = TestEnv::new();
@@ -599,6 +755,7 @@ mod tests {
             schedule: "0 * * * *".into(),
             site_id: site.id.clone(),
             argv: vec!["node".into(), "c.js".into()],
+            http_path: None,
         };
         let dto = create_site_job(&e.state, ok.clone()).unwrap();
         assert_eq!(dto.kind, "site");
@@ -622,10 +779,39 @@ mod tests {
             &e.state,
             CreateCronReq {
                 site_id: "zzz".into(),
-                ..ok
+                ..ok.clone()
             }
         )
         .is_err());
+        // an http job, and the "exactly one of argv / http_path" rule
+        let h = create_site_job(
+            &e.state,
+            CreateCronReq {
+                argv: vec![],
+                http_path: Some("/api/cron/x".into()),
+                ..ok.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            (h.kind.as_str(), h.argv),
+            ("http", Some(vec!["/api/cron/x".to_string()]))
+        );
+        assert!(
+            create_site_job(
+                &e.state,
+                CreateCronReq {
+                    http_path: Some("/x".into()),
+                    ..ok.clone()
+                }
+            )
+            .is_err(),
+            "both"
+        );
+        assert!(
+            create_site_job(&e.state, CreateCronReq { argv: vec![], ..ok }).is_err(),
+            "neither"
+        );
     }
 
     #[test]

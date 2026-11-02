@@ -194,7 +194,13 @@ pub struct CreateCronReq {
     pub name: String,
     pub schedule: String,
     pub site_id: String,
+    /// Run this command (argv, no shell) in a throw-away copy of the site's container.
+    #[serde(default)]
     pub argv: Vec<String>,
+    /// Or: call this path on the running site (`GET`, with `Authorization: Bearer $CRON_SECRET` taken from the
+    /// site's environment when it defines one), the way Vercel Cron does. Exactly one of the two.
+    #[serde(default)]
+    pub http_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]

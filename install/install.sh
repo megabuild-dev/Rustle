@@ -353,7 +353,7 @@ fi
 if [ "$CADDY_MODE" = external ] && [ "$CADDY_KIND" = container ]; then
   cat <<MSG
 
-Rustle is installed next to your Caddy container ($CADDY_CONTAINER), which it can reach only after three small changes
+Rustle is installed next to your Caddy container ($CADDY_CONTAINER), which it can reach only after a few small changes
 to YOUR stack (nothing of yours was modified). Until then Rustle reports the gateway as unreachable and keeps retrying.
 
 1) docker compose, in the caddy service:
@@ -365,15 +365,18 @@ to YOUR stack (nothing of yours was modified). Until then Rustle reports the gat
        rustle-net:
          external: true
 
-2) Caddyfile global options (merge with the block you already have):
+2) Caddyfile global options (must be the first block in the file; merge with yours if you already have one):
      {
          admin unix//run/rustle/caddy-admin.sock|0666
      }
 
 3) Apply them the way you normally do (docker compose up -d caddy), then check:  curl --unix-socket /run/rustle/caddy-admin.sock http://127.0.0.1/config/ | head -c 200
 
-Also add this line after the 'caddy reload' in your site-ctl.sh so Rustle's routes come back immediately after every reload:
-     systemctl kill -s HUP rustle
+If your compose file is assembled from several parts (compose.head.yml / compose.tail.yml), the top-level 'networks:' block must come
+BEFORE 'volumes:' (extra volume lines are appended after it). If you have a script that reloads Caddy, add this after the reload,
+keeping the reload's own failure status:
+     docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile || return 1
+     sudo -n systemctl kill -s HUP rustle >/dev/null 2>&1 || true
 
 Dashboard: $DASH
 See docs/COEXISTENCE.md.
