@@ -18,3 +18,7 @@ strip = true
 
 [profile.dev]
 debug = 1
+
+# Dependencies (argon2, ring, sqlite) are slow unoptimized and dominate test time; our own code stays debug.
+[profile.dev.package."*"]
+opt-level = 2
