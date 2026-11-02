@@ -118,11 +118,18 @@ where
                 };
                 log.lock().unwrap().push(rec.clone());
                 let (status, headers, text) = h(&rec);
+                // `x-raw-latin1: 1` => every char of `text` is one byte (for binary protocols).
+                let raw = headers.iter().any(|(k, _)| k == "x-raw-latin1");
                 let mut b = Response::builder().status(status);
-                for (k, v) in headers {
+                for (k, v) in headers.into_iter().filter(|(k, _)| k != "x-raw-latin1") {
                     b = b.header(k, v);
                 }
-                Ok::<_, Infallible>(b.body(Full::new(Bytes::from(text))).unwrap())
+                let bytes = if raw {
+                    Bytes::from(text.chars().map(|c| c as u8).collect::<Vec<u8>>())
+                } else {
+                    Bytes::from(text)
+                };
+                Ok::<_, Infallible>(b.body(Full::new(bytes)).unwrap())
             }
         });
         let _ = hyper::server::conn::http1::Builder::new()

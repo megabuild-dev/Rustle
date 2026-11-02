@@ -1411,6 +1411,145 @@ mod tests {
         rt.stop("c1", 0).await.unwrap();
     }
 
+    /// A multiplexed log frame as a Latin-1 string (send with the `x-raw-latin1` header): lengths
+    /// above 127 need bytes that are not valid UTF-8.
+    fn raw_frame(stream: u8, payload_len: usize, fill: char) -> String {
+        let mut s = String::new();
+        for b in [stream, 0, 0, 0] {
+            s.push(b as char);
+        }
+        for b in (payload_len as u32).to_be_bytes() {
+            s.push(b as char);
+        }
+        s.extend(std::iter::repeat_n(fill, payload_len));
+        s
+    }
+
+    #[tokio::test]
+    async fn log_size_caps_are_exact() {
+        let raw = || vec![("x-raw-latin1".to_string(), "1".to_string())];
+        // a complete frame whose total size (header + payload) is `total` bytes
+        let body = |total: usize| raw_frame(1, total - 8, 'x');
+        let m = MockHttp::start(move |r| {
+            if r.path.starts_with("/containers/fits/logs") {
+                (200, raw(), body(256 * 1024))
+            } else if r.path.starts_with("/containers/over/logs") {
+                (200, raw(), body(256 * 1024 + 1))
+            } else if r.path.starts_with("/containers/small/logs") {
+                (200, raw(), body(100 * 1024))
+            } else {
+                (404, vec![], String::new())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let small = rt.logs("small", 10).await.unwrap();
+        assert_eq!(small.len(), 100 * 1024 - 8, "well under the cap: untouched");
+        let fits = rt.logs("fits", 10).await.unwrap();
+        assert!(!fits.contains("truncated") && fits.len() == 256 * 1024 - 8);
+        let over = rt.logs("over", 10).await.unwrap();
+        assert!(over.ends_with("[rustle] output truncated\n"));
+    }
+
+    #[tokio::test]
+    async fn follow_stops_a_runaway_stream_and_waits_for_whole_frames() {
+        const MIB: usize = 1024 * 1024;
+        let m = MockHttp::start(|r| {
+            let raw = || vec![("x-raw-latin1".to_string(), "1".to_string())];
+            let big = |total: usize| raw_frame(1, total - 8, 'y');
+            if r.path.starts_with("/containers/exact/logs") {
+                (200, raw(), big(MIB))
+            } else if r.path.starts_with("/containers/over/logs") {
+                (200, raw(), big(MIB + 1))
+            } else if r.path.starts_with("/containers/partial/logs") {
+                // one complete frame, then a header promising 100 bytes of which only 10 arrive
+                let mut v = raw_frame(1, 6, 'w');
+                v.push_str(&raw_frame(1, 100, 'p')[..8 + 10]);
+                (200, raw(), v)
+            } else {
+                (404, vec![], String::new())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let collect = |id: &'static str| {
+            let rt = &rt;
+            async move {
+                let mut rx = rt.logs_follow(id, 1).await.unwrap();
+                let mut got = String::new();
+                while let Some(t) = tokio::time::timeout(Duration::from_secs(3), rx.recv())
+                    .await
+                    .unwrap()
+                {
+                    got.push_str(&t);
+                }
+                got
+            }
+        };
+        assert_eq!(
+            collect("exact").await.len(),
+            MIB - 8,
+            "exactly 1 MiB is still delivered"
+        );
+        assert_eq!(
+            collect("over").await,
+            "",
+            "more than 1 MiB buffered: the stream is dropped"
+        );
+        assert_eq!(
+            collect("partial").await,
+            "wwwwww",
+            "an incomplete trailing frame is never emitted"
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_without_a_status_code_reports_minus_one() {
+        let m = MockHttp::start(|_| (200, vec![], "{}".into())).await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        assert_eq!(
+            rt.wait("c", Duration::from_secs(2)).await.unwrap(),
+            Some(-1)
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_runtime_fixed_ip_and_start_failures_by_image() {
+        let f = FakeRuntime::with_fixed_ip(Some("127.0.0.9".into()));
+        let id = f.create(&spec(false, true)).await.unwrap();
+        assert_eq!(
+            f.inspect(&id).await.unwrap().ip.as_deref(),
+            Some("127.0.0.9")
+        );
+        let plain = FakeRuntime::new();
+        let id2 = plain.create(&spec(false, true)).await.unwrap();
+        assert_ne!(
+            plain.inspect(&id2).await.unwrap().ip.as_deref(),
+            Some("127.0.0.9")
+        );
+
+        let f = FakeRuntime::new();
+        f.fail_start_for("sha256:abc");
+        let bad = f.create(&spec(false, true)).await.unwrap();
+        assert!(f.start(&bad).await.is_err());
+        let mut other = spec(false, true);
+        other.name = "rustle-b".into();
+        other.image = "ghcr.io/o/b@sha256:fff".into();
+        let good = f.create(&other).await.unwrap();
+        f.start(&good).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn fake_follow_numbers_its_heartbeats() {
+        let f = FakeRuntime::new();
+        let id = f.create(&spec(false, true)).await.unwrap();
+        f.start(&id).await.unwrap();
+        let mut rx = f.logs_follow(&id, 1).await.unwrap();
+        assert!(rx.recv().await.unwrap().contains("started"));
+        assert_eq!(rx.recv().await.unwrap(), "[fake] heartbeat 1\n");
+        assert_eq!(rx.recv().await.unwrap(), "[fake] heartbeat 2\n");
+    }
+
     #[tokio::test]
     async fn proxy_denial_is_reported_clearly() {
         let m = MockHttp::start(|_| (403, vec![], "Forbidden".into())).await;
