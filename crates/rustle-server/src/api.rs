@@ -1632,13 +1632,21 @@ mod tests {
         for bad in [
             "no-at-sign",
             "a b@c.d",
-            &format!("{}@x.io", "a".repeat(200)),
+            &format!("{}@x.io", "a".repeat(196)), // 201 characters
         ] {
             let r = put(serde_json::json!({"admin_domain":"","acme_email":bad})).await;
             assert_eq!(r.status, 400, "{bad}");
         }
         assert_eq!(
             put(serde_json::json!({"admin_domain":"","acme_email":"ops@example.com"}))
+                .await
+                .status,
+            200
+        );
+        let at_limit = format!("{}@x.io", "a".repeat(195)); // exactly 200 characters
+        assert_eq!(at_limit.len(), 200);
+        assert_eq!(
+            put(serde_json::json!({"admin_domain":"","acme_email":at_limit}))
                 .await
                 .status,
             200
