@@ -364,4 +364,69 @@ mod tests {
         );
         assert_eq!(decode_signature(b"short"), None);
     }
+
+    #[test]
+    fn constants_and_names() {
+        assert_eq!(MAX_BINARY, 40 * 1024 * 1024);
+        assert_eq!(
+            asset_name(),
+            format!("rustle-{}-linux", std::env::consts::ARCH)
+        );
+        assert!(asset_name().starts_with("rustle-") && asset_name().ends_with("-linux"));
+        assert_eq!(parse_version("1.2.3.4"), None, "exactly three components");
+        assert_eq!(parse_version("  v10.20.30+build "), Some((10, 20, 30)));
+        assert_eq!(parse_version("1.2.x"), None);
+    }
+
+    #[tokio::test]
+    async fn check_reports_the_running_version_and_latest() {
+        let (_kp, pubkey) = keypair();
+        let e = env_with_key(pubkey);
+        e.github.set_release("v0.0.1", &[]);
+        let info = check(&e.state).await;
+        assert_eq!(info.current, VERSION);
+        assert!(info.enabled && !info.update_available);
+        assert_eq!(info.latest.as_deref(), Some("v0.0.1"));
+        e.github.set_release("v99.0.0", &[]);
+        assert!(check(&e.state).await.update_available);
+    }
+
+    #[tokio::test]
+    async fn binaries_must_be_at_least_1_kib_and_elf() {
+        let (kp, pubkey) = keypair();
+        for (len, ok) in [(1023usize, false), (1024, true)] {
+            let e = env_with_key(pubkey);
+            let mut bin = b"\x7fELF".to_vec();
+            bin.resize(len, 0);
+            let sig = kp.sign(&manifest("v9.9.9", std::env::consts::ARCH, &bin));
+            let name = asset_name();
+            e.github.set_release(
+                "v9.9.9",
+                &[
+                    (name.as_str(), bin.as_slice()),
+                    (&format!("{name}.sig"), hex::encode(sig.as_ref()).as_bytes()),
+                ],
+            );
+            std::fs::create_dir_all(&e.state.cfg.bin_dir).unwrap();
+            std::fs::write(e.state.cfg.bin_dir.join("rustle"), fake_elf("old")).unwrap();
+            let r = apply(&e.state).await;
+            assert_eq!(r.is_ok(), ok, "{len} bytes: {r:?}");
+            if !ok {
+                assert_eq!(r.unwrap_err().code, "not_elf");
+            }
+        }
+        // not an ELF file but big enough and correctly signed
+        let e = env_with_key(pubkey);
+        let bin = vec![b'#'; 4096];
+        let sig = kp.sign(&manifest("v9.9.9", std::env::consts::ARCH, &bin));
+        let name = asset_name();
+        e.github.set_release(
+            "v9.9.9",
+            &[
+                (name.as_str(), bin.as_slice()),
+                (&format!("{name}.sig"), hex::encode(sig.as_ref()).as_bytes()),
+            ],
+        );
+        assert_eq!(apply(&e.state).await.unwrap_err().code, "not_elf");
+    }
 }

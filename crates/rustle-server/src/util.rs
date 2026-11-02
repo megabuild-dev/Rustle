@@ -124,4 +124,41 @@ mod tests {
         assert_eq!((y, m, d, h, mi, wd), (2026, 11, 1, 13, 38, 0));
         assert_eq!(stamp(0), "19700101-000000");
     }
+
+    #[test]
+    fn clock_and_length_boundaries() {
+        let t = now();
+        assert!(t > 1_700_000_000, "{t}");
+        let real = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        assert!((real - now()).abs() <= 1);
+        assert!(valid_site_name(&"a".repeat(32)) && !valid_site_name(&"a".repeat(33)));
+        assert!(
+            valid_site_name("a")
+                && valid_site_name("a-b")
+                && !valid_site_name("-a")
+                && !valid_site_name("a-")
+        );
+        // domains: 253 total, labels of at most 63, lowercase letters, digits and inner hyphens only
+        let l63 = "a".repeat(63);
+        assert!(
+            valid_domain(&format!("{l63}.com"))
+                && !valid_domain(&format!("{}.com", "a".repeat(64)))
+        );
+        let long = format!("{l63}.{l63}.{l63}.{}", "b".repeat(253 - 63 * 3 - 3));
+        assert_eq!(long.len(), 253);
+        assert!(valid_domain(&long));
+        assert!(!valid_domain(&format!("{long}c")));
+        for ok in ["a.com", "a-b.example.com", "a1.b2.io", "xn--abc.com"] {
+            assert!(valid_domain(ok), "{ok}");
+        }
+        for bad in [
+            "nodot", "A.com", "a_b.com", "a.com.", ".a.com", "a..com", "-a.com", "a-.com",
+            "1.2.3.4", "1.2", "a b.com",
+        ] {
+            assert!(!valid_domain(bad), "{bad}");
+        }
+    }
 }
