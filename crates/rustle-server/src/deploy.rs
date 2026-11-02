@@ -569,6 +569,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn site_actions_start_stop_restart() {
+        use crate::sites::{site_action, Action};
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        // nothing deployed yet: a clear conflict, not a crash
+        let err = site_action(&e.state, &s.id, Action::Stop)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::CONFLICT);
+        let err = site_action(&e.state, "nope", Action::Stop)
+            .await
+            .unwrap_err();
+        assert_eq!(err.status, axum::http::StatusCode::NOT_FOUND);
+
+        deploy(&e, &s, "v1").await;
+        let running = |e: &TestEnv| e.runtime.containers().iter().filter(|c| c.running).count();
+        assert_eq!(running(&e), 1);
+
+        let dto = site_action(&e.state, &s.id, Action::Stop).await.unwrap();
+        assert_eq!(dto.status, "stopped");
+        assert_eq!(running(&e), 0);
+        assert_eq!(
+            e.state.store.get_site(&s.id).unwrap().unwrap().status,
+            "stopped"
+        );
+
+        let dto = site_action(&e.state, &s.id, Action::Start).await.unwrap();
+        assert_eq!(dto.status, "running");
+        assert_eq!(running(&e), 1);
+
+        e.runtime.clear_calls();
+        let dto = site_action(&e.state, &s.id, Action::Restart).await.unwrap();
+        assert_eq!(dto.status, "running");
+        let calls = e.runtime.calls();
+        assert!(pos(&calls, "stop") < pos(&calls, "start"), "{calls:?}");
+        assert_eq!(running(&e), 1);
+    }
+
+    #[tokio::test]
     async fn first_deploy_happy_path() {
         let e = TestEnv::new();
         let s = site(&e, "blog", 256).await;

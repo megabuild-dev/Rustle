@@ -812,11 +812,15 @@ mod tests {
         let s = &*e.state;
         s.store.set_setting("base_used_mb", "250").unwrap();
         set_mem(&e, 1015808, 760000); // budget 678
-        create_site(s, req("a", "a.example.com", 384)).await.unwrap();
+        create_site(s, req("a", "a.example.com", 384))
+            .await
+            .unwrap();
         let err = create_site(s, req("b", "b.example.com", 384)).await;
         assert!(err.is_err(), "768 MB does not fit a 678 MB budget");
         set_mem(&e, 2031616, 1700000); // upgraded to 2 GB
-        create_site(s, req("b", "b.example.com", 384)).await.unwrap();
+        create_site(s, req("b", "b.example.com", 384))
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -103,12 +103,17 @@ pub fn disk(path: &Path) -> (f32, f32) {
         if libc::statvfs(c.as_ptr(), &mut s) != 0 {
             return (0.0, 0.0);
         }
-        let bs = s.f_frsize as f64;
-        let total = s.f_blocks as f64 * bs;
-        let free = s.f_bavail as f64 * bs;
-        let gb = 1024.0 * 1024.0 * 1024.0;
-        ((total / gb) as f32, ((total - free) / gb) as f32)
+        disk_gb(s.f_blocks as u64, s.f_bavail as u64, s.f_frsize as u64)
     }
+}
+
+/// (total_gb, used_gb) from statvfs block counts.
+pub fn disk_gb(blocks: u64, bavail: u64, frsize: u64) -> (f32, f32) {
+    let bs = frsize as f64;
+    let total = blocks as f64 * bs;
+    let free = bavail as f64 * bs;
+    let gb = 1024.0 * 1024.0 * 1024.0;
+    ((total / gb) as f32, ((total - free) / gb) as f32)
 }
 
 /// Current memory of a container in MiB, from cgroup v2 `memory.current`. Handles both the systemd
@@ -162,6 +167,62 @@ mod tests {
     use super::*;
 
     const MEM: &str = "MemTotal:        1015808 kB\nMemFree:          100000 kB\nMemAvailable:     700000 kB\nSwapTotal:       1572860 kB\nSwapFree:        1500000 kB\n";
+
+    #[test]
+    fn disk_and_system_stats_exact_values() {
+        // 4 KiB blocks: 2^20 blocks = 4 GiB total, 2^19 available -> 2 GiB used
+        assert_eq!(disk_gb(1 << 20, 1 << 19, 4096), (4.0, 2.0));
+        assert_eq!(disk_gb(0, 0, 4096), (0.0, 0.0));
+        let (t, u) = disk(&std::env::temp_dir());
+        assert!(t > 0.0 && u >= 0.0 && u <= t, "{t} {u}");
+        assert_eq!(disk(Path::new("/definitely/not/here")), (0.0, 0.0));
+
+        let dir = std::env::temp_dir().join(format!("rustle-s-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("self")).unwrap();
+        std::fs::write(
+            dir.join("meminfo"),
+            "MemTotal: 2097152 kB\nMemAvailable: 1048576 kB\nSwapTotal: 1048576 kB\nSwapFree: 524288 kB\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("uptime"), "125.9 10.0\n").unwrap();
+        std::fs::write(dir.join("self/status"), "VmRSS: 7168 kB\n").unwrap();
+        let mut st = SystemStats::default();
+        fill_system_stats(&mut st, &dir, &std::env::temp_dir());
+        assert_eq!((st.mem_total_mb, st.mem_used_mb), (2048, 1024));
+        assert_eq!((st.swap_total_mb, st.swap_used_mb), (1024, 512));
+        assert_eq!(st.uptime_secs, 125);
+        assert_eq!(st.rustle_rss_kb, 7168);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn cpu_and_rss_exact_values() {
+        // user nice system idle iowait irq softirq steal guest guest_nice
+        let line = "cpu  10 20 30 40 50 60 70 80 900 1000\ncpu0 1 1 1 1 1 1 1 1 1 1\n";
+        // idle = idle + iowait; total = first 8 columns only (guest time is already in user)
+        assert_eq!(parse_cpu(line), Some((90, 360)));
+        // exactly 4 columns is enough, 3 is not; iowait defaults to 0
+        assert_eq!(parse_cpu("cpu  1 2 3 4\n"), Some((4, 10)));
+        assert_eq!(parse_cpu("cpu  1 2 3\n"), None);
+        assert_eq!(parse_cpu("cpu0 1 2 3 4\n"), None);
+
+        let dir = std::env::temp_dir().join(format!("rustle-m-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("self")).unwrap();
+        std::fs::write(dir.join("self/status"), "Name: x\nVmRSS:   5120 kB\n").unwrap();
+        assert_eq!(self_rss_kb(&dir), 5120);
+        std::fs::write(dir.join("stat"), "cpu  100 0 100 800 0 0 0 0\n").unwrap();
+        let mut s = Sampler::default();
+        assert_eq!(s.cpu_percent(&dir), 0.0, "first sample has no baseline");
+        // unchanged counters: no division by zero, reports 0
+        assert_eq!(s.cpu_percent(&dir), 0.0);
+        // +100 jiffies total, +50 idle -> 50 % busy
+        std::fs::write(dir.join("stat"), "cpu  125 0 125 850 0 0 0 0\n").unwrap();
+        assert!((s.cpu_percent(&dir) - 50.0).abs() < 0.01);
+        // counters going backwards (reboot / wrap) must not panic or report garbage
+        std::fs::write(dir.join("stat"), "cpu  1 0 1 8 0 0 0 0\n").unwrap();
+        assert_eq!(s.cpu_percent(&dir), 0.0);
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn meminfo_parse() {

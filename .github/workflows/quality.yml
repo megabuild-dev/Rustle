@@ -1,0 +1,31 @@
+name: quality
+# Slow, advisory checks: CRAP score and mutation testing. Not part of the PR gate.
+on:
+  workflow_dispatch:
+  schedule: [{ cron: "17 3 * * 1" }]
+permissions: { contents: read }
+jobs:
+  crap:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with: { components: llvm-tools-preview }
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-llvm-cov rust-code-analysis-cli --locked
+      - run: scripts/quality.sh crap | tee crap.txt
+        continue-on-error: true
+      - uses: actions/upload-artifact@v4
+        with: { name: crap, path: crap.txt }
+  mutants:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo install cargo-mutants --locked
+      - run: scripts/quality.sh mutants
+      - if: always()
+        uses: actions/upload-artifact@v4
+        with: { name: mutants, path: target/mutants/mutants.out }

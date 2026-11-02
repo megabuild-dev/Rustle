@@ -179,6 +179,116 @@ mod tests {
     const D: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 
     #[test]
+    fn component_rules_exact_boundaries() {
+        let ok = |s: &str| valid_component(s);
+        assert!(ok("a"));
+        assert!(ok(&"a".repeat(128)));
+        assert!(!ok(&"a".repeat(129)));
+        assert!(!ok(""));
+        // separators allowed inside, never at the ends
+        assert!(ok("my-repo") && ok("my.repo") && ok("my_repo") && ok("a0"));
+        assert!(!ok("-a") && !ok("a-") && !ok(".a") && !ok("a.") && !ok("_a") && !ok("a_"));
+        // repeated separators: only dashes may repeat
+        assert!(ok("a--b"));
+        assert!(!ok("a..b") && !ok("a__b") && !ok("a._b") && !ok("a-.b") && !ok("a--.b"));
+        assert!(
+            ok("a.-b") && ok("a_-b"),
+            "a dash may follow another separator"
+        );
+        // uppercase and other characters are rejected
+        assert!(!ok("Ab") && !ok("a b") && !ok("a/b") && !ok("a:b"));
+    }
+
+    #[test]
+    fn tag_rules_exact_boundaries() {
+        assert!(valid_tag("v1.2-3_x"));
+        assert!(valid_tag("_x") && valid_tag("0"));
+        assert!(valid_tag(&"a".repeat(128)));
+        assert!(!valid_tag(&"a".repeat(129)));
+        assert!(!valid_tag("") && !valid_tag("-x") && !valid_tag(".x"));
+        assert!(!valid_tag("a b") && !valid_tag("a/b") && !valid_tag("a:b"));
+    }
+
+    #[test]
+    fn parse_boundaries() {
+        // overall length: 255 ok, 256 rejected
+        let name = |n: usize| {
+            format!(
+                "{}/{}/{}",
+                "x".repeat(100),
+                "y".repeat(100),
+                "z".repeat(n - 202)
+            )
+        };
+        assert!(ImageRef::parse(&name(255)).is_ok());
+        assert_eq!(ImageRef::parse(&name(256)).unwrap_err().0, "length");
+        assert_eq!(ImageRef::parse("").unwrap_err().0, "length");
+        // whitespace and control characters are each rejected on their own
+        for bad in ["a b", "a\tb", "a\nb", "a\u{1}b", "a\rb"] {
+            assert_eq!(ImageRef::parse(bad).unwrap_err().0, "whitespace", "{bad:?}");
+        }
+        // a registry host of exactly 253 chars is accepted; its character set is checked
+        let h253 = format!("{}.{}", "h".repeat(126), "i".repeat(126));
+        assert_eq!(h253.len(), 253);
+        assert_eq!(ImageRef::parse(&format!("{h253}/a")).unwrap().host, h253);
+        assert!(
+            ImageRef::parse("ex_ample.com/a").is_err(),
+            "underscore in host"
+        );
+        assert_eq!(ImageRef::parse("GHCR.io/o/a").unwrap().host, "ghcr.io");
+        // what counts as a registry: dot, port or localhost in the first component
+        assert_eq!(ImageRef::parse("localhost/a").unwrap().host, "localhost");
+        assert_eq!(
+            ImageRef::parse("localhost:5000/a").unwrap().host,
+            "localhost:5000"
+        );
+        assert_eq!(ImageRef::parse("reg:5000/a").unwrap().host, "reg:5000");
+        assert_eq!(ImageRef::parse("user/app").unwrap().host, "docker.io");
+        assert_eq!(ImageRef::parse("user/app").unwrap().path, "user/app");
+        assert_eq!(ImageRef::parse("app").unwrap().path, "library/app");
+        // a single component that looks like a host is just a repo name
+        assert_eq!(ImageRef::parse("a.b").unwrap().path, "library/a.b");
+        // a registry with nothing after it
+        assert!(ImageRef::parse("ghcr.io/").is_err());
+        assert!(ImageRef::parse("ghcr.io//a").is_err());
+        // digest and tag together
+        let d = format!("sha256:{}", "a".repeat(64));
+        let r = ImageRef::parse(&format!("ghcr.io/o/a:v1@{d}")).unwrap();
+        assert_eq!(
+            (r.tag.as_deref(), r.digest.as_deref()),
+            (Some("v1"), Some(d.as_str()))
+        );
+        assert_eq!(
+            ImageRef::parse("ghcr.io/o/a@sha256:xyz").unwrap_err().0,
+            "digest"
+        );
+        assert_eq!(ImageRef::parse("ghcr.io/o/a:-bad").unwrap_err().0, "tag");
+    }
+
+    #[test]
+    fn digest_and_untagged_name_edges() {
+        let hex = "a".repeat(64);
+        assert!(valid_digest(&format!("sha256:{hex}")));
+        assert!(!valid_digest(&format!("sha256:{}", "a".repeat(63))));
+        assert!(!valid_digest(&format!("sha256:{}", "a".repeat(65))));
+        assert!(
+            !valid_digest(&format!("sha256:{}g", "a".repeat(63))),
+            "64 chars, one not hex"
+        );
+        assert!(
+            !valid_digest(&format!("sha256:{}A", "a".repeat(63))),
+            "uppercase is not hex here"
+        );
+        assert!(!valid_digest(&hex), "missing algorithm prefix");
+        // no '/' at all: the ':' still introduces a tag
+        let r = ImageRef::parse("app:v1").unwrap();
+        assert_eq!(
+            (r.path.as_str(), r.tag.as_deref()),
+            ("library/app", Some("v1"))
+        );
+    }
+
+    #[test]
     fn basic_forms() {
         let r = ImageRef::parse("ghcr.io/Owner/app").err();
         assert!(r.is_some(), "uppercase repo path is rejected");
