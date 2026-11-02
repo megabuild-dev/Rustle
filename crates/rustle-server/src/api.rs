@@ -1700,4 +1700,246 @@ mod tests {
             "x@y.io"
         );
     }
+
+    async fn raw_body(c: &Client, method: Method, path: &str, body: Vec<u8>) -> Reply {
+        let mut b = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("content-type", "application/json");
+        if let Some(ck) = &c.cookie {
+            b = b.header("cookie", ck);
+        }
+        b = b.header("x-csrf-token", c.csrf.clone().unwrap_or_default());
+        let resp = c
+            .app
+            .clone()
+            .oneshot(b.body(Body::from(body)).unwrap())
+            .await
+            .unwrap();
+        let (parts, body) = resp.into_parts();
+        let bytes = axum::body::to_bytes(body, 1 << 20).await.unwrap().to_vec();
+        Reply {
+            status: parts.status,
+            headers: parts.headers,
+            body: bytes,
+        }
+    }
+
+    /// A JSON object whose total size is `n` bytes.
+    fn json_of_len(key: &str, n: usize) -> Vec<u8> {
+        let overhead = format!("{{\"{key}\":\"\"}}").len();
+        format!("{{\"{key}\":\"{}\"}}", "a".repeat(n - overhead)).into_bytes()
+    }
+
+    #[tokio::test]
+    async fn request_body_limits_are_exact() {
+        let (_e, c) = logged_in().await;
+        // login and webhook: 4 KiB
+        for path in ["/api/v1/auth/login", "/api/v1/webhooks/deploy"] {
+            let ok = raw_body(&c, Method::POST, path, json_of_len("username", 4096)).await;
+            assert_ne!(
+                ok.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path}: 4096 bytes fit"
+            );
+            let big = raw_body(&c, Method::POST, path, json_of_len("username", 4097)).await;
+            assert_eq!(
+                big.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path}: 4097 bytes do not"
+            );
+            let mid = raw_body(&c, Method::POST, path, json_of_len("username", 2000)).await;
+            assert_ne!(
+                mid.status,
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "{path}: 2000 bytes fit"
+            );
+        }
+        // everything else: 64 KiB
+        let site: SiteDto = c.post("/api/v1/sites", site_body("blog")).await.json();
+        let env = |n: usize| {
+            let v = "a".repeat(n);
+            format!("{{\"vars\":[{{\"key\":\"K\",\"value\":\"{v}\"}}]}}").into_bytes()
+        };
+        let overhead = env(0).len();
+        let path = format!("/api/v1/sites/{}/env", site.id);
+        let fits = raw_body(&c, Method::PUT, &path, env(65_536 - overhead)).await;
+        assert_ne!(
+            fits.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "exactly 64 KiB fits"
+        );
+        let too_big = raw_body(&c, Method::PUT, &path, env(65_537 - overhead)).await;
+        assert_eq!(too_big.status, StatusCode::PAYLOAD_TOO_LARGE);
+        let mid = raw_body(&c, Method::PUT, &path, env(5_000)).await;
+        assert_ne!(
+            mid.status,
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "5 KB is fine on a normal route"
+        );
+    }
+
+    #[tokio::test]
+    async fn login_credential_length_limits() {
+        let e = TestEnv::new();
+        seed_admin(&e);
+        let c = Client::new(&e);
+        let try_login = |user: String, pw: String| {
+            let c = &c;
+            let e = &e;
+            async move {
+                e.state.auth.login_ok("local");
+                c.raw(
+                    Method::POST,
+                    "/api/v1/auth/login",
+                    Some(serde_json::json!({"username": user, "password": pw})),
+                    &[],
+                )
+                .await
+                .status
+            }
+        };
+        assert_eq!(
+            try_login("a".repeat(128), "x".repeat(512)).await,
+            401,
+            "at the limits: judged, not rejected"
+        );
+        assert_eq!(try_login("a".repeat(129), "x".into()).await, 400);
+        assert_eq!(try_login("a".into(), "x".repeat(513)).await, 400);
+    }
+
+    #[tokio::test]
+    async fn failed_logins_are_audited_first_three_then_every_tenth() {
+        let e = TestEnv::new();
+        seed_admin(&e);
+        let c = Client::new(&e);
+        for _ in 0..12 {
+            e.state.auth.expire_wait("local");
+            let r = c
+                .raw(
+                    Method::POST,
+                    "/api/v1/auth/login",
+                    Some(serde_json::json!({"username":"admin","password":"wrong"})),
+                    &[],
+                )
+                .await;
+            assert_eq!(r.status, 401);
+        }
+        let logged: Vec<String> = e
+            .state
+            .store
+            .audit_entries()
+            .into_iter()
+            .filter(|(_, a, _)| a == "login.failed")
+            .map(|(_, _, t)| t)
+            .collect();
+        assert_eq!(logged, vec!["x1", "x2", "x3", "x10"]);
+    }
+
+    #[tokio::test]
+    async fn backoff_reports_retry_after() {
+        let e = TestEnv::new();
+        seed_admin(&e);
+        let c = Client::new(&e);
+        for _ in 0..4 {
+            c.raw(
+                Method::POST,
+                "/api/v1/auth/login",
+                Some(serde_json::json!({"username":"admin","password":"wrong"})),
+                &[],
+            )
+            .await;
+        }
+        let r = c
+            .raw(
+                Method::POST,
+                "/api/v1/auth/login",
+                Some(serde_json::json!({"username":"admin","password":"correct horse battery"})),
+                &[],
+            )
+            .await;
+        assert_eq!(
+            r.status, 429,
+            "even the right password waits out the penalty"
+        );
+        let ra: i64 = r.headers[header::RETRY_AFTER]
+            .to_str()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!((1..=2).contains(&ra), "{ra}");
+    }
+
+    #[tokio::test]
+    async fn password_change_length_rules_and_audit() {
+        let (e, c) = logged_in().await;
+        let change = |new: String| {
+            let body = serde_json::json!({"current":"correct horse battery","new":new});
+            c.req(Method::POST, "/api/v1/auth/password", Some(body))
+        };
+        assert_eq!(change("a".repeat(11)).await.status, 400);
+        assert_eq!(
+            change("é".repeat(11)).await.status,
+            400,
+            "11 characters, 22 bytes"
+        );
+        assert_eq!(change("a".repeat(513)).await.status, 400);
+        assert_eq!(change("é".repeat(257)).await.status, 400, "514 bytes");
+        assert_eq!(
+            change("é".repeat(12)).await.status,
+            204,
+            "12 characters are enough, whatever their width"
+        );
+        assert!(e
+            .state
+            .store
+            .audit_entries()
+            .iter()
+            .any(|(_, a, t)| a == "password.change" && t == "admin"));
+    }
+
+    #[tokio::test]
+    async fn password_change_accepts_the_exact_maximum() {
+        let (_e, c) = logged_in().await;
+        let body = serde_json::json!({"current":"correct horse battery","new":"a".repeat(512)});
+        assert_eq!(
+            c.req(Method::POST, "/api/v1/auth/password", Some(body))
+                .await
+                .status,
+            204
+        );
+    }
+
+    #[tokio::test]
+    async fn stats_flags_follow_degraded_reason_and_gateway_mode() {
+        let (e, _c) = logged_in().await;
+        let st = collect_stats(&e.state);
+        assert!(st.runtime_ok && st.gateway_ok && st.degraded_reason.is_none());
+        assert!(st.mem_total_mb > 0 && st.budget_mb > 0);
+        assert!(st.public_ip_mode && !st.admin_domain_set && !st.gateway_external);
+        e.state
+            .set_degraded(Some("container runtime unreachable: x".into()));
+        let st = collect_stats(&e.state);
+        assert!(!st.runtime_ok && st.gateway_ok);
+        e.state.set_degraded(Some("gateway unreachable: x".into()));
+        let st = collect_stats(&e.state);
+        assert!(st.runtime_ok && !st.gateway_ok);
+        e.state.set_degraded(Some("database error".into()));
+        let st = collect_stats(&e.state);
+        assert!(
+            st.runtime_ok
+                && st.gateway_ok
+                && st.degraded_reason.as_deref() == Some("database error")
+        );
+        e.state
+            .store
+            .set_setting("admin_domain", "dash.example.com")
+            .unwrap();
+        let st = collect_stats(&e.state);
+        assert!(st.admin_domain_set && !st.public_ip_mode);
+        // shared Caddy: never "public IP mode"
+        let x = TestEnv::external();
+        let st = collect_stats(&x.state);
+        assert!(st.gateway_external && !st.public_ip_mode);
+    }
 }

@@ -823,6 +823,19 @@ impl Store {
         Ok(())
     }
 
+    /// (actor, action, target), oldest first. Tests only: there is no API for reading the audit log yet.
+    #[cfg(test)]
+    pub fn audit_entries(&self) -> Vec<(String, String, String)> {
+        let c = self.c();
+        let mut st = c
+            .prepare("SELECT actor,action,target FROM audit_log ORDER BY id")
+            .unwrap();
+        st.query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+    }
+
     pub fn audit_count(&self) -> AppResult<i64> {
         Ok(self
             .c()

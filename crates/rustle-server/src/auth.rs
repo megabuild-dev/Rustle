@@ -117,6 +117,14 @@ impl AuthState {
         e.0
     }
 
+    /// Tests only: let `ip` try again right now while keeping its failure count.
+    #[cfg(test)]
+    pub fn expire_wait(&self, ip: &str) {
+        if let Some(e) = self.backoff.lock().unwrap().get_mut(ip) {
+            e.1 = 0;
+        }
+    }
+
     pub fn login_ok(&self, ip: &str) {
         self.backoff
             .lock()
