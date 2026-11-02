@@ -49,6 +49,14 @@ impl Deployer {
         self.lock().get(site_id).is_some_and(|s| s.running)
     }
 
+    /// Drop the running flag and any queued job (the run loop died).
+    fn abandon(&self, site_id: &str) {
+        if let Some(slot) = self.lock().get_mut(site_id) {
+            slot.running = false;
+            slot.queued = None;
+        }
+    }
+
     pub fn any_busy(&self) -> bool {
         self.lock().values().any(|s| s.running)
     }
@@ -169,7 +177,28 @@ pub fn request_deploy(
     }
 }
 
+/// Releases a site's deployment slot if the run loop unwinds, so a panic cannot leave the site
+/// "busy" forever (release builds abort on panic; this protects debug and test builds).
+struct SlotGuard<'a> {
+    deployer: &'a Deployer,
+    site_id: &'a str,
+    released: bool,
+}
+
+impl Drop for SlotGuard<'_> {
+    fn drop(&mut self) {
+        if !self.released {
+            self.deployer.abandon(self.site_id);
+        }
+    }
+}
+
 async fn run_loop(state: Arc<AppState>, site_id: String, mut job: Job) {
+    let mut guard = SlotGuard {
+        deployer: &state.deployer,
+        site_id: &site_id,
+        released: false,
+    };
     loop {
         execute(&state, &site_id, &job).await;
         match state.deployer.next(&site_id) {
@@ -177,6 +206,7 @@ async fn run_loop(state: Arc<AppState>, site_id: String, mut job: Job) {
             None => break,
         }
     }
+    guard.released = true;
 }
 
 struct Failure {
@@ -1320,5 +1350,41 @@ mod tests {
         assert!(d.next("s").is_none());
         assert!(!d.is_busy("s"));
         assert!(!d.is_busy("other"));
+    }
+
+    #[tokio::test]
+    async fn a_panicking_run_loop_frees_the_slot() {
+        let e = TestEnv::new();
+        let s = site(&e, "blog", 256).await;
+        let state = e.state.clone();
+        assert!(matches!(
+            state.deployer.submit(&s.id, job_stub()),
+            Submit::Run
+        ));
+        // a job that panics inside `execute`: its deployment row is for a different image repo and the
+        // runtime is poisoned by a panicking fake
+        let st2 = state.clone();
+        let id = s.id.clone();
+        let h = tokio::spawn(async move {
+            let guard_state = st2.clone();
+            let _ = &guard_state;
+            run_loop_panicking(st2, id).await;
+        });
+        assert!(h.await.is_err(), "the task panicked");
+        assert!(!state.deployer.is_busy(&s.id), "slot released");
+        assert!(
+            matches!(state.deployer.submit(&s.id, job_stub()), Submit::Run),
+            "next deploy is not queued forever"
+        );
+    }
+
+    async fn run_loop_panicking(state: Arc<AppState>, site_id: String) {
+        let mut guard = SlotGuard {
+            deployer: &state.deployer,
+            site_id: &site_id,
+            released: false,
+        };
+        let _ = &mut guard;
+        panic!("boom");
     }
 }

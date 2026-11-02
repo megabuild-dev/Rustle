@@ -201,10 +201,13 @@ fn tail(s: &str, max: usize) -> String {
     if s.len() <= max {
         return s.to_string();
     }
-    let mut start = s.len() - max;
-    while !s.is_char_boundary(start) {
-        start += 1;
-    }
+    // The first character that starts at or after `len - max` (never splits a character).
+    let from = s.len() - max;
+    let start = s
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|i| *i >= from)
+        .unwrap_or(s.len());
     format!("…{}", &s[start..])
 }
 
@@ -951,6 +954,13 @@ mod tests {
     #[test]
     fn tail_keeps_the_end_on_char_boundaries() {
         assert_eq!(tail("abc", 10), "abc");
+        assert_eq!(tail("abc", 3), "abc", "exactly max is untouched");
+        assert_eq!(tail("abcdef", 3), "…def");
+        assert_eq!(tail("abcdef", 1), "…f");
+        assert_eq!(tail("abcdef", 0), "…");
+        // 'é' is two bytes: a cut inside it moves forward to the next character
+        assert_eq!(tail("aéb", 2), "…b");
+        assert_eq!(tail("aéb", 3), "…éb");
         let t = tail(&"é".repeat(100), 11);
         assert!(t.len() <= 14 && t.starts_with('…'));
     }
