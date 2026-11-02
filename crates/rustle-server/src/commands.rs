@@ -64,13 +64,16 @@ pub fn parse(args: &[String]) -> Command {
     }
 }
 
+/// Small stacks for the (at most two) blocking threads: thread count and size are memory.
+const BLOCKING_STACK_BYTES: usize = 512 * 1024;
+
 fn runtime() -> tokio::runtime::Runtime {
     // One thread for the event loop; at most two blocking threads with small stacks. The admin
     // process has a hard 48 MB cap, so thread count is memory.
     tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .max_blocking_threads(2)
-        .thread_stack_size(512 * 1024)
+        .thread_stack_size(BLOCKING_STACK_BYTES)
         .build()
         .expect("tokio runtime")
 }
@@ -413,5 +416,14 @@ mod tests {
             code == 0 && o.contains(" imported, ") && o.contains("Open the dashboard"),
             "{o}"
         );
+    }
+
+    #[test]
+    fn runtime_is_single_threaded_with_small_stacks() {
+        assert_eq!(BLOCKING_STACK_BYTES, 524_288);
+        let rt = runtime();
+        // the event loop is the current thread; blocking work still runs
+        let n = rt.block_on(async { tokio::task::spawn_blocking(|| 21 * 2).await.unwrap() });
+        assert_eq!(n, 42);
     }
 }

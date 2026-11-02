@@ -175,7 +175,14 @@ fn parse_pubkey(h: &str) -> Option<[u8; 32]> {
 
 /// (fake_backends, real_gateway, fake_container_ip): only honoured in `dev-fakes` builds.
 fn dev_flags(get: &impl Fn(&str) -> Option<String>) -> (bool, bool, Option<String>) {
-    if !cfg!(feature = "dev-fakes") {
+    dev_flags_if(cfg!(feature = "dev-fakes"), get)
+}
+
+fn dev_flags_if(
+    enabled: bool,
+    get: &impl Fn(&str) -> Option<String>,
+) -> (bool, bool, Option<String>) {
+    if !enabled {
         return (false, false, None);
     }
     let mode = get("RUSTLE_FAKE_BACKENDS");
@@ -324,18 +331,23 @@ mod tests {
         assert_eq!(parse_pubkey("abcd"), None);
         assert_eq!(parse_pubkey("zz"), None);
         let none = |_: &str| None;
-        assert_eq!(dev_flags(&none), (false, false, None));
+        assert_eq!(dev_flags_if(true, &none), (false, false, None));
         let docker = |k: &str| match k {
             "RUSTLE_FAKE_BACKENDS" => Some("docker".to_string()),
             "RUSTLE_FAKE_CONTAINER_IP" => Some("10.1.1.1".to_string()),
             _ => None,
         };
-        if cfg!(feature = "dev-fakes") {
-            assert_eq!(dev_flags(&docker), (true, true, Some("10.1.1.1".into())));
-            let all = |k: &str| (k == "RUSTLE_FAKE_BACKENDS").then(|| "1".to_string());
-            assert_eq!(dev_flags(&all), (true, false, None));
-        } else {
-            assert_eq!(dev_flags(&docker), (false, false, None));
-        }
+        // never honoured unless the build has the dev-fakes feature
+        assert_eq!(dev_flags_if(false, &docker), (false, false, None));
+        assert_eq!(
+            dev_flags_if(true, &docker),
+            (true, true, Some("10.1.1.1".into()))
+        );
+        let all = |k: &str| (k == "RUSTLE_FAKE_BACKENDS").then(|| "1".to_string());
+        assert_eq!(dev_flags_if(true, &all), (true, false, None));
+        let other = |k: &str| (k == "RUSTLE_FAKE_BACKENDS").then(|| "dockerx".to_string());
+        assert_eq!(dev_flags_if(true, &other), (true, false, None));
+        // the production wrapper follows the compiled feature
+        assert_eq!(dev_flags(&docker).0, cfg!(feature = "dev-fakes"));
     }
 }

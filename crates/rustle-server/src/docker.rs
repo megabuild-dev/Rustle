@@ -1352,6 +1352,65 @@ mod tests {
         drop(rx);
     }
 
+    #[test]
+    fn demux_handles_stderr_first_and_tty_streams() {
+        let mut data = vec![2, 0, 0, 0, 0, 0, 0, 4];
+        data.extend_from_slice(b"err\n");
+        assert_eq!(
+            demux_logs(&data),
+            "err\n",
+            "a stream that starts with a stderr frame is framed"
+        );
+        assert_eq!(
+            demux_logs(b"\x03tty"),
+            "\x03tty",
+            "first byte above 2: raw TTY output"
+        );
+        assert_eq!(demux_logs(b""), "");
+        // a header announcing more than is there is cut at the end of the data
+        let mut cut = vec![1, 0, 0, 0, 0, 0, 0, 99];
+        cut.extend_from_slice(b"abc");
+        assert_eq!(demux_logs(&cut), "abc");
+        // exactly 8 bytes: an empty frame
+        assert_eq!(demux_logs(&[1, 0, 0, 0, 0, 0, 0, 0]), "");
+    }
+
+    #[tokio::test]
+    async fn pull_error_lines_are_honoured_up_to_64_kib_and_stop_is_not_cut_short() {
+        // a pull-progress line whose JSON is exactly `json_len` bytes, then the newline
+        let pad = |json_len: usize| {
+            let head = "{\"error\":\"denied\",\"p\":\"";
+            let tail = "\"}";
+            format!(
+                "{head}{}{tail}\n",
+                "x".repeat(json_len - head.len() - tail.len())
+            )
+        };
+        let exact = pad(64 * 1024);
+        assert_eq!(exact.len(), 64 * 1024 + 1);
+        let over = pad(64 * 1024 + 1);
+        let m = MockHttp::start(move |r| {
+            if r.path.contains("fromImage=ghcr.io%2Fo%2Fexact") {
+                (200, vec![], exact.clone())
+            } else if r.path.contains("fromImage=ghcr.io%2Fo%2Fover") {
+                (200, vec![], over.clone())
+            } else if r.path.contains("/stop") {
+                std::thread::sleep(Duration::from_millis(150));
+                (204, vec![], String::new())
+            } else {
+                (200, vec![], String::new())
+            }
+        })
+        .await;
+        let rt = HttpRuntime::new(Target::Tcp(m.addr.clone()), "rustle-net".into());
+        let e = rt.pull("ghcr.io/o/exact:v1", None).await.unwrap_err();
+        assert!(e.to_string().contains("denied"), "{e}");
+        // one byte more and the line is truncated, so it is no longer valid JSON and is ignored
+        assert!(rt.pull("ghcr.io/o/over:v1", None).await.is_ok());
+        // `stop` keeps at least 30 s of patience even for a zero grace period
+        rt.stop("c1", 0).await.unwrap();
+    }
+
     #[tokio::test]
     async fn proxy_denial_is_reported_clearly() {
         let m = MockHttp::start(|_| (403, vec![], "Forbidden".into())).await;

@@ -4,4 +4,9 @@ exclude_re = [
   # Only returns freed heap pages to the OS (malloc_trim); no observable behaviour. Its effect is
   # measured by scripts/rss_smoke.py.
   "replace release_memory with \\(\\)",
+  # Process-global side effects at startup (allocator arenas, global logger) and the blocking serve
+  # entry point; exercised by scripts/e2e-*.sh and scripts/rss_smoke.py, not by unit tests.
+  "replace tune_allocator with \\(\\)",
+  "replace init_logging with \\(\\)",
+  "replace serve -> u8 with",
 ]

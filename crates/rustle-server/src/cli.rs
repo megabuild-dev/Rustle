@@ -212,6 +212,7 @@ pub fn parse_env_file(text: &str) -> Vec<rustle_types::EnvVar> {
 }
 
 /// What one `site-ctl` site becomes in Rustle.
+#[derive(Debug)]
 struct SitePlan {
     name: String,
     domain: String,
@@ -768,5 +769,111 @@ mod tests {
         st.delete_setting("public_ip").unwrap();
         st.set_setting("admin_domain", "").unwrap();
         assert!(caddy_config(&c2).unwrap().contains("198.51.100.9"));
+    }
+
+    fn warnings(meta: &str) -> Vec<String> {
+        let mut n = Vec::new();
+        unsupported_warnings(meta, &mut n);
+        n
+    }
+
+    #[test]
+    fn unsupported_site_ctl_features_are_reported_only_when_used() {
+        assert!(warnings("DOMAIN=a.example.com\n").is_empty());
+        assert!(warnings("WWW=0\nCACHE=0\nHEALTH=/\n").is_empty());
+        let w = warnings("WWW=1\n");
+        assert!(w.len() == 1 && w[0].contains("www redirect"), "{w:?}");
+        let w = warnings("CACHE=1\n");
+        assert!(w.len() == 1 && w[0].contains("cache volume"), "{w:?}");
+        let w = warnings("HEALTH=/healthz\n");
+        assert!(
+            w.len() == 1 && w[0].contains("custom path") || w[0].contains("not on your"),
+            "{w:?}"
+        );
+        assert_eq!(warnings("WWW=yes\nCACHE=1\nHEALTH=/x\n").len(), 3);
+    }
+
+    #[test]
+    fn cron_lines_need_a_schedule_a_tab_and_a_safe_path() {
+        let mut notes = Vec::new();
+        let ok = parse_cron_lines(
+            "*/5 * * * *\t/api/cron/a\n\n  \n0 3 * * *\t /api/cron/b \nnot a schedule\t/x\n* * * * *\t//evil\n* * * * * /no-tab\n* * * * *\n",
+            &mut notes,
+        );
+        assert_eq!(
+            ok,
+            vec![
+                ("*/5 * * * *".to_string(), "/api/cron/a".to_string()),
+                ("0 3 * * *".to_string(), "/api/cron/b".to_string())
+            ]
+        );
+        assert_eq!(notes.len(), 4, "{notes:?}");
+        assert!(notes.iter().all(|n| n.contains("unreadable cron line")));
+        // a valid schedule with a bad path, and a bad schedule with a good path, are each refused
+        let mut n = Vec::new();
+        assert!(parse_cron_lines("* * * * *\t//evil\n", &mut n).is_empty() && n.len() == 1);
+        let mut n = Vec::new();
+        assert!(parse_cron_lines("99 * * * *\t/ok\n", &mut n).is_empty() && n.len() == 1);
+    }
+
+    #[test]
+    fn a_missing_cron_secret_is_flagged_only_for_sites_with_cron_jobs() {
+        let d = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(d.path().join("env")).unwrap();
+        std::fs::create_dir_all(d.path().join("cron.d")).unwrap();
+        let meta = "DOMAIN=a.example.com\nMEM=256\n";
+        let yml = "image: ghcr.io/o/a:1\n";
+        let write = |sub: &str, ext: &str, text: &str| {
+            std::fs::write(d.path().join(sub).join(format!("a.{ext}")), text).unwrap();
+        };
+        let warn = |p: &SitePlan| p.notes.iter().any(|n| n.contains("no CRON_SECRET"));
+        // cron jobs, no secret
+        write("cron.d", "cron", "* * * * *\t/api/cron/x\n");
+        let p = plan_site(d.path(), "a", meta, yml).unwrap();
+        assert!(warn(&p) && p.crons.len() == 1);
+        // cron jobs and a secret
+        write("env", "env", "CRON_SECRET=abc\n");
+        assert!(!warn(&plan_site(d.path(), "a", meta, yml).unwrap()));
+        // no cron jobs and no secret
+        write("env", "env", "OTHER=1\n");
+        write("cron.d", "cron", "");
+        let p = plan_site(d.path(), "a", meta, yml).unwrap();
+        assert!(!warn(&p) && p.crons.is_empty());
+        // the summary line is last and counts what was found
+        assert!(
+            p.notes.last().unwrap().contains("1 env vars  0 cron jobs"),
+            "{:?}",
+            p.notes
+        );
+        // refusals
+        assert!(plan_site(d.path(), "A_b", meta, yml)
+            .unwrap_err()
+            .contains("not valid"));
+        assert!(plan_site(d.path(), "a", "DOMAIN=nope\n", yml)
+            .unwrap_err()
+            .contains("invalid domain"));
+        assert!(plan_site(d.path(), "a", meta, "image: docker.io/x/y\n")
+            .unwrap_err()
+            .contains("only ghcr.io"));
+        assert!(plan_site(d.path(), "a", meta, "")
+            .unwrap_err()
+            .contains("cannot read the image"));
+        // RAM rounding: 220 -> 224, 8 -> 64 (minimum), 9999 -> 512 (maximum), 256 unchanged
+        for (mem, want) in [
+            ("220", 224),
+            ("8", 64),
+            ("9999", 512),
+            ("256", 256),
+            ("", 256),
+        ] {
+            let m = format!("DOMAIN=a.example.com\nMEM={mem}\n");
+            let p = plan_site(d.path(), "a", &m, yml).unwrap();
+            assert_eq!(p.ram, want, "{mem}");
+            assert_eq!(
+                p.notes.iter().any(|n| n.contains("becomes")),
+                mem != "256" && mem != "" && want != mem.parse().unwrap_or(0),
+                "{mem}"
+            );
+        }
     }
 }
