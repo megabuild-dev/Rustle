@@ -778,6 +778,47 @@ mod tests {
         }
     }
 
+    fn set_mem(e: &TestEnv, total_kb: u64, avail_kb: u64) {
+        std::fs::write(
+            e.state.cfg.proc_root.join("meminfo"),
+            format!("MemTotal: {total_kb} kB\nMemAvailable: {avail_kb} kB\n"),
+        )
+        .unwrap();
+    }
+
+    #[tokio::test]
+    async fn budget_for_fresh_existing_and_upgraded_vps() {
+        let e = TestEnv::new();
+        let s = &*e.state;
+        // 1: fresh 1 GB box, ~250 MB used by OS + stack.
+        s.store.set_setting("base_used_mb", "250").unwrap();
+        set_mem(&e, 1015808, 760000);
+        assert_eq!(budget_total(s), 992 - 250 - 64);
+        // 2: box that already runs two legacy sites + Caddy (~520 MB used at install time):
+        // the budget shrinks honestly instead of promising RAM that is not there.
+        s.store.set_setting("base_used_mb", "520").unwrap();
+        assert_eq!(budget_total(s), 992 - 520 - 64);
+        // 3: plan upgrade to 2 GB, no restart / no reconfiguration: budget follows MemTotal.
+        set_mem(&e, 2031616, 1500000);
+        assert_eq!(budget_total(s), 1984 - 520 - 64);
+        // an explicit override still wins over the measurement
+        s.store.set_setting("budget_override_mb", "900").unwrap();
+        assert_eq!(budget_total(s), 900);
+    }
+
+    #[tokio::test]
+    async fn upgrade_lets_a_previously_rejected_site_in() {
+        let e = TestEnv::new();
+        let s = &*e.state;
+        s.store.set_setting("base_used_mb", "250").unwrap();
+        set_mem(&e, 1015808, 760000); // budget 678
+        create_site(s, req("a", "a.example.com", 384)).await.unwrap();
+        let err = create_site(s, req("b", "b.example.com", 384)).await;
+        assert!(err.is_err(), "768 MB does not fit a 678 MB budget");
+        set_mem(&e, 2031616, 1700000); // upgraded to 2 GB
+        create_site(s, req("b", "b.example.com", 384)).await.unwrap();
+    }
+
     #[tokio::test]
     async fn create_validates_and_configures_gateway() {
         let e = TestEnv::new();

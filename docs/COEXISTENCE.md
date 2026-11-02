@@ -139,3 +139,21 @@ IP. A `caddy reload` drops Rustle's routes just like above: they return within 1
   untouched until the first deploy, `caddy reload` drops Rustle's routes and SIGHUP or the 15 s poll restores them, rollback by deleting the
   site, headers and compression like `(common)`. Not verified: your actual compose/Docker networking, see items 33-42 of
   [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
+
+## RAM budget: existing servers and plan upgrades
+
+The RAM budget offered to Rustle-managed sites is `MemTotal − base_used_mb − 64 MiB reserve`.
+`MemTotal` is read live; `base_used_mb` is measured once, at `rustle init`.
+
+* **Fresh Ubuntu box** — base is about 250 MB (OS + Docker + Caddy + Rustle); a 1 GB box gets a ~680 MB budget.
+* **Box that already runs sites** (case in this document) — the legacy containers are running when
+  `init` measures, so they are part of the base and the budget is honestly smaller. Existing swap is
+  left untouched (the installer only creates a swapfile when none exists).
+  After you migrate a legacy site into Rustle and remove its old container, the base is stale
+  (conservative, never unsafe). Set **Settings → RAM budget override** to the figure you want, or
+  delete the `base_used_mb` setting and restart to have it re-measured while the box is quiet.
+* **Plan upgrade (1 GB → 2 GB, no reinstall)** — nothing to do. `MemTotal` changes after the resize/reboot,
+  so the budget, the dashboard bars and the zero-downtime headroom check all follow it
+  immediately. Existing swap stays as it is. Rustle's own limits (48 MB) do not scale, on purpose.
+  Per-site `ram_limit_mb` stays as set; raise it per site (max 512) and redeploy if you want more.
+  Covered by `budget_for_fresh_existing_and_upgraded_vps` and `upgrade_lets_a_previously_rejected_site_in`.
