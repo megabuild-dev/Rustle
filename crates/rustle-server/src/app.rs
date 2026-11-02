@@ -117,6 +117,8 @@ pub struct Tuning {
     pub oneshot_timeout: Duration,
     /// Whole-request limit for HTTP cron jobs.
     pub http_job_timeout: Duration,
+    /// How long a self-update waits for running deployments to finish.
+    pub update_idle_wait: Duration,
 }
 
 impl Default for Tuning {
@@ -127,6 +129,7 @@ impl Default for Tuning {
             stop_timeout_secs: 10,
             oneshot_timeout: Duration::from_secs(600),
             http_job_timeout: Duration::from_secs(60),
+            update_idle_wait: Duration::from_secs(120),
         }
     }
 }
@@ -288,6 +291,7 @@ impl TestEnv {
                 stop_timeout_secs: 1,
                 oneshot_timeout: Duration::from_millis(200),
                 http_job_timeout: Duration::from_secs(2),
+                update_idle_wait: Duration::from_secs(1),
             },
             running_jobs: Mutex::new(HashSet::new()),
         });

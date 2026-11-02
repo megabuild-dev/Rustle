@@ -109,7 +109,11 @@ pub async fn apply(state: &Arc<AppState>) -> AppResult<String> {
 
     state.maintenance.store(true, Ordering::SeqCst);
     let result = async {
-        if !state.deployer.wait_all_idle(Duration::from_secs(120)).await {
+        if !state
+            .deployer
+            .wait_all_idle(state.tuning.update_idle_wait)
+            .await
+        {
             return Err(AppError::conflict(
                 "deployments are still running; try again shortly",
             ));

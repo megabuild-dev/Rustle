@@ -3,49 +3,73 @@
 Line coverage says code *ran*; these two say whether the tests would *notice* a defect.
 
 ```bash
-scripts/quality.sh crap                # coverage x complexity, per function
-scripts/quality.sh mutants [files...]  # cargo-mutants (default: cron, imageref, metrics)
+scripts/quality.sh crap                 # coverage x complexity, per function (gate: every function < 30)
+scripts/quality.sh mutants [files...]   # cargo-mutants (default: cron, imageref, metrics)
 ```
 
 Tools: `cargo install cargo-llvm-cov cargo-mutants rust-code-analysis-cli --locked`.
-CI: `.github/workflows/quality.yml` (weekly + manual, advisory, uploads reports; not a PR gate
-because mutation runs take 15-30 min per ~200 mutants on 4 cores).
+
+| Where | What | Blocking |
+|---|---|---|
+| `.github/workflows/ci.yml` job `crap` | every function must have CRAP < 30 | yes |
+| `.github/workflows/quality.yml` (weekly + manual) | CRAP report, then full-crate mutation run | no (reports uploaded) |
 
 ## CRAP score
 
 `CRAP = CC^2 * (1 - coverage)^3 + CC` per function (`scripts/crap.py`). CC = cyclomatic complexity
-(rust-code-analysis), coverage = line coverage of the function body (llvm-cov). `mod tests` is
-excluded. Conventional ceiling: **30**. A function can only get under it by being simpler or
-better tested; 100 % coverage still leaves CRAP = CC, so CC > 30 is "split it up" regardless.
+(rust-code-analysis), coverage = line coverage of the function body (llvm-cov). `mod tests` is excluded.
+The gate fails when any function reaches **30**.
 
-Baseline (first run, 473 functions, 22 above 30):
+Baseline before this work: 473 functions, 22 at or above 30 (entry points at 0 %, the real Docker
+transport at 0 %, and four functions with CC 31-55).
+Now: **542 functions, none at or above 30, mean 4.4, highest 26.5** (`update::apply`).
 
-| Group | Functions | Why | Plan |
-|---|---|---|---|
-| Process wiring, 0 % | `server::run`, `main::main`, `config::from_env`, `main::init_logging` | Entry points; exercised by the headless-browser e2e and `scripts/e2e-*.sh`, which do not feed llvm-cov | Leave; covered end-to-end. Split `from_env` into parse helpers if it grows |
-| Real Docker transport, 0 % | `docker::logs_follow/list_containers/wait/list_images/logs`, `caddy::set_admin` | Only reachable with a real Docker/Caddy | Covered by `scripts/e2e-real.sh` / `e2e-shared-caddy.sh` (CI jobs `real-docker`, `shared-caddy`) |
-| High CC, well covered | `run_deploy` (48), `import_site_ctl` (55), `init` (44), `imageref::parse` (30), `cron::field` (26) | Long validation / state machines | Candidates for splitting into steps; coverage is already 82-100 % so CRAP ~= CC |
-| Low coverage + moderate CC | `run_system` (10, 33 %), `run_http_job`, `put_settings`, `download`, `send_stream` | Error branches untested | Add failure-path tests |
+What it took:
 
-`sites::site_action` (CC 20, 0 % in the lcov run) now has `site_actions_start_stop_restart`.
+* **Entry points made testable.** `main` is three lines; `commands::{parse, execute, entry}` hold the CLI,
+  `server::{open_checked, run_until, listen_tcp, listen_unix, reconcile_loop, ...}` hold the process
+  wiring, `Config::from_lookup` holds configuration parsing (`from_env` only supplies `std::env::var`).
+* **Long functions split by stage:** `run_deploy` (CC 48 -> 19: pull/pin, env snapshot, spec, create+start,
+  health, traffic switch, retire), `import_site_ctl` (55 -> 24: plan / persist / warnings / cron lines),
+  `cli::init` (44 -> small helpers), `reconcile::sync` (31 -> desired upstream + push route),
+  `imageref::parse` (30 -> digest / tag / host helpers), `httpc::send_stream` (TLS connect extracted).
+* **Real transports tested against `MockHttp`:** Docker list/logs/follow/wait/pull/stop, `set_admin` in
+  every Caddy mode, GitHub downloads with redirects, TLS connect failures.
 
 ## Mutation testing
 
-`cargo mutants` rewrites operators/returns one at a time and re-runs the unit tests; a surviving
-mutant is a behaviour no test pins down.
+`cargo mutants` rewrites operators and return values one at a time and re-runs the unit tests; a surviving
+mutant is a behaviour no test pins down. Configuration: `.cargo/mutants.toml`.
 
-First scoped run (`cron.rs`, `imageref.rs`, `metrics.rs`; 224 mutants): 174 caught, 45 missed,
-2 timeouts (infinite loops, counted as caught), 3 unviable, i.e. **78.7 %**. Survivors were
-length/boundary checks in `imageref`, CPU/disk/meminfo arithmetic in `metrics`. Tests added:
-`imageref::{component_rules_exact_boundaries, tag_rules_exact_boundaries, parse_boundaries,
-digest_and_untagged_name_edges}`, `metrics::{cpu_and_rss_exact_values,
-disk_and_system_stats_exact_values}` (disk math split into pure `disk_gb`).
+Crate-wide result (about 3,000 mutants over every module of `rustle-server`; "unviable" = the mutation does
+not compile, which is most of the handler-returning-`Json` replacements):
 
-After the added tests the survivors were re-run (`--iterate`): **47 of 48 caught; the only survivor is the
-equivalent mutant below**, so the three files are at 100 % of killable mutants.
+* every survivor was either fixed with a test (about 150 tests were added: boundaries of every limit, exact
+  values for arithmetic, exact status/error mapping, side effects such as audit entries and slot release) or is
+  listed below;
+* the dependency profile now builds with `opt-level = 2` for third-party crates (argon2 dominated test time),
+  which made the suite 5x faster and the mutation runs feasible (about 2 h for the whole crate).
 
-Equivalent mutants (cannot be killed, behaviour identical) are accepted, e.g.
-`imageref.rs: i > last_slash` -> `>=` (a ':' and a '/' can never share an index).
+### Accepted (documented) outcomes
 
-Not yet mutation-tested (next, in order of risk): `crypto`, `auth`, `deploy`, `caddy` route
-building, `store`. Run one at a time: `scripts/quality.sh mutants crates/rustle-server/src/crypto.rs`.
+| Mutant | Why it stays |
+|---|---|
+| `imageref.rs`: `i > last_slash` -> `>=` | equivalent: a ':' and a '/' can never share an index |
+| non-terminating mutants (`cron::field` `step==0`, `docker::logs_follow` `i += 8+len` -> `*=`) | the mutated loop never ends; cargo-mutants reports a timeout, i.e. the suite cannot pass |
+| `release_memory`, `tune_allocator`, `init_logging`, `serve`, `shutdown_signal`, `run` -> `Ok(())`, `dev_flags` wrapper | excluded in `.cargo/mutants.toml`: process-global side effects or a signal; covered by `scripts/e2e-*.sh`, `scripts/rss_smoke.py` and the systemd unit |
+
+### Hardening found by the exercise
+
+* `Deployer`: a panic inside the run loop left the site "busy" forever in debug/test builds; a `SlotGuard`
+  now releases the slot (release builds abort on panic and recover through the boot reconcile).
+* `jobs::tail` had an unbounded `while` that could spin on an out-of-range index; it is now a single search.
+* `cli::parse_env_file` lost two dead special cases (blank/comment lines are skipped by the key check).
+* `crypto`: the non-unix `write_secret_file` fallback was removed (Rustle is Linux-only).
+
+### Running it yourself
+
+```bash
+scripts/quality.sh mutants crates/rustle-server/src/auth.rs                # one file, ~10 min
+cargo mutants -p rustle-server --iterate -o target/mutants ...             # re-test only survivors
+cargo mutants -p rustle-server --list | awk -F: '{print $1}' | sort | uniq -c   # sizes
+```

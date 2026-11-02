@@ -18,5 +18,8 @@ case "$mode" in
     [ ${#files[@]} -eq 0 ] && files=(-f crates/rustle-server/src/cron.rs -f crates/rustle-server/src/imageref.rs -f crates/rustle-server/src/metrics.rs)
     cargo mutants -p rustle-server "${files[@]}" -j "${JOBS:-2}" --timeout-multiplier 3 --no-shuffle -o target/mutants
     ;;
-  *) echo "usage: $0 [crap|mutants [files]]" >&2; exit 2;;
+  all-mutants)
+    cargo mutants -p rustle-server -j "${JOBS:-4}" --timeout-multiplier 3 --no-shuffle -o target/mutants
+    ;;
+  *) echo "usage: $0 [crap|mutants [files]|all-mutants]" >&2; exit 2;;
 esac

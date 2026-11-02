@@ -18,13 +18,13 @@ jobs:
         with: { name: crap, path: crap.txt }
   mutants:
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-mutants --locked
-      - run: scripts/quality.sh mutants
+      - run: scripts/quality.sh all-mutants
       - if: always()
         uses: actions/upload-artifact@v4
         with: { name: mutants, path: target/mutants/mutants.out }

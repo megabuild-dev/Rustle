@@ -1387,4 +1387,48 @@ mod tests {
         let _ = &mut guard;
         panic!("boom");
     }
+
+    #[tokio::test]
+    async fn start_first_needs_the_limit_plus_64_mb_available() {
+        let e = TestEnv::new();
+        let avail = |mb: u64| {
+            std::fs::write(
+                e.state.cfg.proc_root.join("meminfo"),
+                format!("MemTotal: 2097152 kB\nMemAvailable: {} kB\n", mb * 1024),
+            )
+            .unwrap();
+        };
+        avail(256 + 63);
+        assert!(!has_headroom(&e.state, 256));
+        avail(256 + 64);
+        assert!(has_headroom(&e.state, 256));
+        avail(256 + 65);
+        assert!(has_headroom(&e.state, 256));
+        avail(0);
+        assert!(!has_headroom(&e.state, 64));
+    }
+
+    #[tokio::test]
+    async fn self_update_refuses_while_a_deployment_runs() {
+        let (_kp, pubkey) = (0, [7u8; 32]);
+        let mut e = TestEnv::new();
+        Arc::get_mut(&mut e.state).unwrap().cfg.update_pubkey = Some(pubkey);
+        let name = crate::update::asset_name();
+        e.github.set_release(
+            "v9.9.9",
+            &[(name.as_str(), b"x"), (&format!("{name}.sig"), b"y")],
+        );
+        assert!(matches!(
+            e.state.deployer.submit("s", job_stub()),
+            Submit::Run
+        ));
+        let started = std::time::Instant::now();
+        let err = crate::update::apply(&e.state).await.unwrap_err();
+        assert!(
+            started.elapsed() >= Duration::from_millis(900),
+            "waited for the tuned idle period; got {err:?}"
+        );
+        assert!(started.elapsed() < Duration::from_secs(10));
+        assert_eq!(err.status, axum::http::StatusCode::CONFLICT, "{err:?}");
+    }
 }
