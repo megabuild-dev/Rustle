@@ -79,8 +79,15 @@ impl Deployer {
         }
     }
 
+    /// Test helper: wait for a site's deployment to finish, failing loudly instead of hanging.
+    #[cfg(test)]
     pub async fn wait_idle(&self, site_id: &str) {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(20);
         while self.is_busy(site_id) {
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "deployment of {site_id} did not finish"
+            );
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     }

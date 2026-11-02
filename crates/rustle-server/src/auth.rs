@@ -596,6 +596,13 @@ mod tests {
         }
         r.allow("probe", 5, 10, 12); // age 7 < 10 => still counted
         assert_eq!(r.map.lock().unwrap().len(), 514);
+        // pruning starts only above 512 entries: at exactly 512 nothing is dropped yet
+        let r = RateLimiter::default();
+        for i in 0..512 {
+            r.allow(&format!("k{i}"), 5, 10, 0);
+        }
+        r.allow("probe", 5, 10, 100);
+        assert_eq!(r.map.lock().unwrap().len(), 513);
     }
 
     #[test]

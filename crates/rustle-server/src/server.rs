@@ -345,11 +345,21 @@ mod tests {
         let h = tokio::spawn(run_until(c, async move {
             let _ = rx.await;
         }));
-        let mut s = loop {
+        let mut s = None;
+        for _ in 0..250 {
+            if h.is_finished() {
+                break; // the server stopped on its own: report why below
+            }
             match tokio::net::UnixStream::connect(&sock).await {
-                Ok(s) => break s,
+                Ok(c) => {
+                    s = Some(c);
+                    break;
+                }
                 Err(_) => tokio::time::sleep(Duration::from_millis(20)).await,
             }
+        }
+        let Some(mut s) = s else {
+            panic!("server did not come up: {:?}", h.await);
         };
         s.write_all(b"GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await
