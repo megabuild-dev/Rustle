@@ -378,7 +378,9 @@ mod tests {
             }
         }
         let Some(mut s) = s else {
-            panic!("server did not come up: {:?}", h.await);
+            let _ = tx.send(()); // let a server that is still waiting for its shutdown signal finish
+            let outcome = tokio::time::timeout(Duration::from_secs(3), h).await;
+            panic!("server did not come up: {outcome:?}");
         };
         s.write_all(b"GET /api/health HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
             .await

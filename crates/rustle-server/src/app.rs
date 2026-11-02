@@ -115,6 +115,8 @@ pub struct Tuning {
     pub health_interval: Duration,
     pub stop_timeout_secs: u32,
     pub oneshot_timeout: Duration,
+    /// Whole-request limit for HTTP cron jobs.
+    pub http_job_timeout: Duration,
 }
 
 impl Default for Tuning {
@@ -124,6 +126,7 @@ impl Default for Tuning {
             health_interval: Duration::from_secs(2),
             stop_timeout_secs: 10,
             oneshot_timeout: Duration::from_secs(600),
+            http_job_timeout: Duration::from_secs(60),
         }
     }
 }
@@ -284,6 +287,7 @@ impl TestEnv {
                 health_interval: Duration::from_millis(1),
                 stop_timeout_secs: 1,
                 oneshot_timeout: Duration::from_millis(200),
+                http_job_timeout: Duration::from_secs(2),
             },
             running_jobs: Mutex::new(HashSet::new()),
         });

@@ -317,14 +317,13 @@ pub async fn call_site_http(
     target: &crate::httpc::Target,
     path: &str,
     secret: Option<&str>,
+    timeout: std::time::Duration,
 ) -> (Option<i64>, String) {
     let mut req = crate::httpc::Req::get(path);
     if let Some(s) = secret {
         req = req.header("authorization", format!("Bearer {s}"));
     }
-    match crate::httpc::send_capped(target, &req, std::time::Duration::from_secs(60), 8 * 1024)
-        .await
-    {
+    match crate::httpc::send_capped(target, &req, timeout, 8 * 1024).await {
         Ok((resp, _)) => {
             let ok = (200..300).contains(&resp.status);
             (
@@ -392,6 +391,7 @@ async fn run_http_job(state: &AppState, job: &CronRow) -> (Option<i64>, String) 
         &crate::httpc::Target::Tcp(format!("{ip}:{}", site.container_port)),
         &path,
         secret.as_deref(),
+        state.tuning.http_job_timeout,
     )
     .await
 }
@@ -567,6 +567,8 @@ mod tests {
         e.state.deployer.wait_idle(&s.id).await;
         e.state.store.get_site(&s.id).unwrap().unwrap()
     }
+
+    const T: std::time::Duration = std::time::Duration::from_secs(5);
 
     fn job(site: &str, argv: &[&str]) -> CronRow {
         CronRow {
@@ -782,13 +784,18 @@ mod tests {
         })
         .await;
         let t = crate::httpc::Target::Tcp(m.addr.clone());
-        let (code, log) = call_site_http(&t, "/api/cron/x", Some("s3cret")).await;
+        let (code, log) = call_site_http(&t, "/api/cron/x", Some("s3cret"), T).await;
         assert_eq!((code, log.as_str()), (Some(0), "200 {\"cleaned\":3}"));
-        let (code, log) = call_site_http(&t, "/api/cron/x", None).await;
+        let (code, log) = call_site_http(&t, "/api/cron/x", None, T).await;
         assert_eq!((code, log.as_str()), (Some(1), "401 nope"));
         assert_eq!(m.requests()[0].method, "GET");
-        let (code, _) =
-            call_site_http(&crate::httpc::Target::Tcp("127.0.0.1:1".into()), "/", None).await;
+        let (code, _) = call_site_http(
+            &crate::httpc::Target::Tcp("127.0.0.1:1".into()),
+            "/",
+            None,
+            T,
+        )
+        .await;
         assert_eq!(code, Some(1));
     }
 
@@ -875,12 +882,14 @@ mod tests {
         let e = TestEnv::new();
         let site = deployed_site(&e).await;
         let cid = e.runtime.containers()[0].id.clone();
+        // a loopback address: if the job wrongly tried the stopped site it would fail at once
+        e.runtime.set_ip(&cid, "127.0.0.1");
         e.runtime.stop(&cid, 1).await.unwrap();
         let mut j = job(&site.id, &["/api/cron/x"]);
         j.kind = "http".into();
         let (code, log) = run_http_job(&e.state, &j).await;
         assert_eq!(code, Some(-1));
-        assert!(log.starts_with("skipped"), "{log}");
+        assert!(log.starts_with("skipped: site is not running"), "{log}");
     }
 
     #[tokio::test]
@@ -1088,14 +1097,14 @@ mod tests {
         })
         .await;
         let t = crate::httpc::Target::Tcp(m.addr.clone());
-        let (_, log) = call_site_http(&t, "/big", None).await;
+        let (_, log) = call_site_http(&t, "/big", None, T).await;
         assert_eq!(
             log.len(),
             "200 ".len() + 8 * 1024,
             "body cut at 8 KiB: {}",
             log.len()
         );
-        let (_, log) = call_site_http(&t, "/exact", None).await;
+        let (_, log) = call_site_http(&t, "/exact", None, T).await;
         assert_eq!(log.len(), 4 + 8 * 1024 - 4);
     }
 
