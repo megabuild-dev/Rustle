@@ -954,4 +954,108 @@ mod tests {
         let t = tail(&"é".repeat(100), 11);
         assert!(t.len() <= 14 && t.starts_with('…'));
     }
+
+    #[test]
+    fn argv_limits_are_exact() {
+        let items = |n: usize| vec!["a".to_string(); n];
+        assert!(validate_argv(&items(1)).is_ok());
+        assert!(validate_argv(&items(32)).is_ok());
+        assert!(validate_argv(&items(33)).is_err());
+        assert!(validate_argv(&[]).is_err());
+        assert!(validate_argv(&["a".repeat(1024)]).is_ok());
+        assert!(validate_argv(&["a".repeat(1025)]).is_err());
+        assert!(validate_argv(&[String::new()]).is_err());
+        assert!(validate_argv(&["a\0b".to_string()]).is_err());
+        assert_eq!(MAX_LOG, 16 * 1024);
+    }
+
+    #[tokio::test]
+    async fn job_dto_reports_running_success_and_failure() {
+        let e = TestEnv::new();
+        let site = deployed_site(&e).await;
+        let st = &e.state.store;
+        let mut row = job(&site.id, &["node"]);
+        row.id = "jdto".into();
+        st.insert_cron(&row).unwrap();
+        assert_eq!(cron_dto(&e.state, &row).last_status, None, "never ran");
+        let status = |finished: Option<i64>, exit: Option<i64>| {
+            let id = st.insert_run("jdto", 100).unwrap();
+            if let Some(f) = finished {
+                st.finish_run(id, f, exit, "").unwrap();
+            }
+            cron_dto(&e.state, &row)
+        };
+        assert_eq!(status(None, None).last_status.as_deref(), Some("running"));
+        assert_eq!(
+            status(Some(101), Some(0)).last_status.as_deref(),
+            Some("success")
+        );
+        assert_eq!(
+            status(Some(102), Some(1)).last_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            status(Some(103), None).last_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(
+            status(Some(104), Some(-1)).last_status.as_deref(),
+            Some("failed")
+        );
+        assert_eq!(cron_dto(&e.state, &row).last_run_at, Some(100));
+    }
+
+    #[tokio::test]
+    async fn site_job_name_rules() {
+        let e = TestEnv::new();
+        let site = deployed_site(&e).await;
+        let mk = |name: &str| CreateCronReq {
+            name: name.into(),
+            schedule: "0 * * * *".into(),
+            site_id: site.id.clone(),
+            argv: vec!["node".into()],
+            http_path: None,
+        };
+        assert!(create_site_job(&e.state, mk(&"n".repeat(80))).is_ok());
+        assert!(create_site_job(&e.state, mk(&"n".repeat(81))).is_err());
+        assert!(create_site_job(&e.state, mk("")).is_err());
+        assert!(create_site_job(&e.state, mk("   ")).is_err());
+        assert!(create_site_job(&e.state, mk("x")).is_ok());
+    }
+
+    #[tokio::test]
+    async fn run_job_dispatches_by_kind_and_records_the_run() {
+        let e = TestEnv::new();
+        let site = deployed_site(&e).await;
+        let cid = e.runtime.containers()[0].id.clone();
+        e.runtime.stop(&cid, 1).await.unwrap();
+        let st = &e.state.store;
+        let mut row = job(&site.id, &["/api/cron/x"]);
+        row.kind = "http".into();
+        st.insert_cron(&row).unwrap();
+        e.state.running_jobs.lock().unwrap().insert(row.id.clone());
+        run_job(e.state.clone(), row.clone()).await;
+        let run = st.last_run(&row.id).unwrap().unwrap();
+        assert_eq!(run.exit_code, Some(-1));
+        assert_eq!(
+            run.log_tail, "skipped: site is not running",
+            "http jobs are run by the http runner"
+        );
+        assert!(
+            !e.state.running_jobs.lock().unwrap().contains(&row.id),
+            "slot released"
+        );
+        // a system job goes to the system runner
+        let mut sys = job(&site.id, &[]);
+        sys.id = "sys1".into();
+        sys.kind = "system".into();
+        sys.system_key = Some("nonexistent".into());
+        st.insert_cron(&sys).unwrap();
+        run_job(e.state.clone(), sys.clone()).await;
+        let run = st.last_run("sys1").unwrap().unwrap();
+        assert_eq!(
+            (run.exit_code, run.log_tail.as_str()),
+            (Some(1), "unknown system job 'nonexistent'")
+        );
+    }
 }

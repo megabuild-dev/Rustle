@@ -86,3 +86,51 @@ impl IntoResponse for AppError {
         (self.status, Json(body)).into_response()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn display_and_status_mapping() {
+        assert_eq!(AppError::conflict("busy").to_string(), "conflict: busy");
+        assert_eq!(AppError::not_found("x").to_string(), "not_found: x");
+        for (e, s) in [
+            (AppError::bad_request("a"), StatusCode::BAD_REQUEST),
+            (AppError::unauthorized("a"), StatusCode::UNAUTHORIZED),
+            (AppError::forbidden("a"), StatusCode::FORBIDDEN),
+            (AppError::not_found("a"), StatusCode::NOT_FOUND),
+            (AppError::conflict("a"), StatusCode::CONFLICT),
+            (AppError::too_many("a"), StatusCode::TOO_MANY_REQUESTS),
+            (AppError::unavailable("a"), StatusCode::SERVICE_UNAVAILABLE),
+            (
+                AppError::unprocessable("c", "a"),
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                AppError::internal("boom"),
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+        ] {
+            assert_eq!(e.status, s);
+        }
+    }
+
+    #[test]
+    fn constraint_violations_become_conflicts_and_other_db_errors_are_internal() {
+        let db = rusqlite::Connection::open_in_memory().unwrap();
+        db.execute("CREATE TABLE t(a UNIQUE)", []).unwrap();
+        db.execute("INSERT INTO t VALUES(1)", []).unwrap();
+        let dup = db.execute("INSERT INTO t VALUES(1)", []).unwrap_err();
+        let e: AppError = dup.into();
+        assert_eq!(e.status, StatusCode::CONFLICT);
+        let missing = db.execute("INSERT INTO nope VALUES(1)", []).unwrap_err();
+        let e: AppError = missing.into();
+        assert_eq!(e.status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(
+            !e.message.contains("nope"),
+            "internal details are not leaked: {}",
+            e.message
+        );
+    }
+}

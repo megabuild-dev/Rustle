@@ -654,4 +654,31 @@ mod tests {
         assert_eq!(gh.download(&url, 100).await.unwrap(), b"BINARY");
         assert!(gh.download(&url, 3).await.is_err(), "size cap enforced");
     }
+
+    #[test]
+    fn relative_redirects_work_for_short_hosts_too() {
+        assert_eq!(resolve_location("http://h/p/q", "/y"), "http://h/y");
+        assert_eq!(
+            resolve_location("https://a.io", "/y"),
+            "https://a.io/y",
+            "no path at all"
+        );
+        assert_eq!(
+            resolve_location("http://127.0.0.1:8080/a", "/b?x=1"),
+            "http://127.0.0.1:8080/b?x=1"
+        );
+    }
+
+    #[tokio::test]
+    async fn fake_download_enforces_its_limit_exactly() {
+        let gh = FakeGithub::new();
+        gh.set_release("v1", &[("a", b"12345")]);
+        let url = gh.latest_release("o/r").await.unwrap().assets[0].1.clone();
+        assert_eq!(gh.download(&url, 5).await.unwrap(), b"12345");
+        assert!(gh.download(&url, 4).await.is_err());
+        assert!(gh
+            .download("https://example.invalid/none", 100)
+            .await
+            .is_err());
+    }
 }

@@ -451,4 +451,36 @@ mod tests {
         assert_eq!(p, "");
         assert!(Target::from_url("ftp://x").is_err());
     }
+
+    #[tokio::test]
+    async fn body_limits_are_exact() {
+        assert_eq!(MAX_BODY, 8 * 1024 * 1024);
+        let m = MockHttp::start(|r| match r.path.as_str() {
+            "/max" => (200, vec![], "x".repeat(8 * 1024 * 1024)),
+            "/over" => (200, vec![], "x".repeat(8 * 1024 * 1024 + 1)),
+            "/cap" => (200, vec![], "y".repeat(100)),
+            _ => (200, vec![], "y".repeat(101)),
+        })
+        .await;
+        let t = Target::Tcp(m.addr.clone());
+        let ok = send(&t, &Req::get("/max"), Duration::from_secs(20))
+            .await
+            .unwrap();
+        assert_eq!(ok.body.len(), 8 * 1024 * 1024);
+        let e = send(&t, &Req::get("/over"), Duration::from_secs(20))
+            .await
+            .unwrap_err();
+        assert!(matches!(e, HttpError::TooLarge), "{e:?}");
+        let (r, truncated) = send_capped(&t, &Req::get("/cap"), Duration::from_secs(5), 100)
+            .await
+            .unwrap();
+        assert!(
+            !truncated && r.body.len() == 100,
+            "exactly the cap is not truncated"
+        );
+        let (r, truncated) = send_capped(&t, &Req::get("/more"), Duration::from_secs(5), 100)
+            .await
+            .unwrap();
+        assert!(truncated && r.body.len() == 100);
+    }
 }
