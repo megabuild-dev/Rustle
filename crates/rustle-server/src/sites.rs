@@ -1172,4 +1172,30 @@ mod tests {
         assert!(!st.contains("__PORT__"));
         assert!(!y.contains("rt_"));
     }
+
+    #[test]
+    fn env_validation_limits_are_exact() {
+        let var = |k: &str, v: &str| EnvVar {
+            key: k.into(),
+            value: v.into(),
+        };
+        assert_eq!(MAX_ENV_VARS, 64);
+        assert_eq!(MAX_ENV_VALUE, 8192);
+        let many = |n: usize| {
+            (0..n)
+                .map(|i| var(&format!("K{i}"), "v"))
+                .collect::<Vec<_>>()
+        };
+        assert!(validate_env(&many(64)).is_ok());
+        assert!(validate_env(&many(65)).is_err());
+        assert!(validate_env(&[var("A", &"x".repeat(8192))]).is_ok());
+        assert!(validate_env(&[var("A", &"x".repeat(8193))]).is_err());
+        assert!(validate_env(&[var("A", "a\0b")]).is_err());
+        assert!(
+            validate_env(&[var("A", "1"), var("A", "2")]).is_err(),
+            "duplicates"
+        );
+        assert!(validate_env(&[var("1BAD", "1")]).is_err());
+        assert!(validate_env(&[]).is_ok());
+    }
 }

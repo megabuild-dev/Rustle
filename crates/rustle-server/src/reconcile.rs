@@ -25,9 +25,8 @@ pub fn base_params(state: &AppState) -> BaseParams {
 /// Everything that must exist after a restart. Returns the reason when the system is degraded.
 pub async fn boot(state: &AppState) -> Option<String> {
     let t = crate::util::now();
-    match state.store.fail_stuck_deployments(t) {
-        Ok(n) if n > 0 => tracing::warn!("marked {n} interrupted deployment(s) as failed"),
-        _ => {}
+    if let Ok(n) = state.store.fail_stuck_deployments(t) {
+        tracing::info!("interrupted deployments marked failed: {n}");
     }
     let _ = state.store.fail_stuck_runs(t);
     if let Err(e) = crate::jobs::seed_system_jobs(&state.store) {
@@ -449,6 +448,121 @@ mod tests {
         assert_ne!(
             e.state.store.get_site(&s.id).unwrap().unwrap().status,
             "deploying"
+        );
+    }
+
+    fn upserts(e: &TestEnv) -> Vec<String> {
+        e.gateway
+            .calls()
+            .into_iter()
+            .filter(|c| c.starts_with("upsert") || c.starts_with("upstream"))
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn base_params_ignore_a_blank_acme_email() {
+        let e = TestEnv::new();
+        e.state.store.set_setting("acme_email", "").unwrap();
+        assert!(base_params(&e.state).acme_email.is_none());
+        e.state
+            .store
+            .set_setting("acme_email", "ops@example.com")
+            .unwrap();
+        assert_eq!(
+            base_params(&e.state).acme_email.as_deref(),
+            Some("ops@example.com")
+        );
+    }
+
+    #[tokio::test]
+    async fn managed_caddy_only_repairs_missing_routes_unless_full() {
+        let e = TestEnv::new();
+        let s = mk(&e, "blog").await;
+        webhook(&e.state, &s, "ghcr.io/o/blog:1").unwrap();
+        e.state.deployer.wait_idle(&s.id).await;
+        e.gateway.clear_calls();
+        assert!(sync(&e.state, false).await.is_none());
+        assert!(
+            upserts(&e).is_empty(),
+            "route exists: nothing to do: {:?}",
+            e.gateway.calls()
+        );
+        sync(&e.state, true).await;
+        assert_eq!(upserts(&e).len(), 1, "a full pass re-pushes every route");
+        e.gateway.clear_calls();
+        e.gateway.remove_site("blog").await.unwrap();
+        e.gateway.clear_calls();
+        sync(&e.state, false).await;
+        assert_eq!(upserts(&e).len(), 1, "a missing route is recreated");
+        assert!(e.gateway.sites().contains_key("blog"));
+    }
+
+    #[tokio::test]
+    async fn shared_caddy_retargets_cheaply_and_pushes_fully_on_boot() {
+        let e = TestEnv::external();
+        let s = mk(&e, "blog").await;
+        webhook(&e.state, &s, "ghcr.io/o/blog:1").unwrap();
+        e.state.deployer.wait_idle(&s.id).await;
+        e.gateway.clear_calls();
+        sync(&e.state, false).await;
+        let calls = upserts(&e);
+        assert_eq!(calls.len(), 1);
+        assert!(
+            calls[0].starts_with("upstream blog "),
+            "cheap retarget: {calls:?}"
+        );
+        e.gateway.clear_calls();
+        sync(&e.state, true).await;
+        let calls = upserts(&e);
+        assert!(
+            calls.len() == 1 && calls[0].starts_with("upsert blog "),
+            "{calls:?}"
+        );
+        // route lost (the owner reloaded Caddy): the retarget fails, so the route is recreated
+        e.gateway.remove_site("blog").await.unwrap();
+        e.gateway.clear_calls();
+        sync(&e.state, false).await;
+        assert!(e.gateway.sites().contains_key("blog"));
+    }
+
+    #[tokio::test]
+    async fn an_undeployed_site_gets_a_placeholder_route_only_on_a_managed_caddy() {
+        let managed = TestEnv::new();
+        mk(&managed, "blog").await;
+        managed.gateway.wipe();
+        sync(&managed.state, true).await;
+        assert!(
+            managed.gateway.sites().contains_key("blog"),
+            "placeholder so the domain answers"
+        );
+        let shared = TestEnv::external();
+        mk(&shared, "blog").await;
+        shared.gateway.wipe();
+        sync(&shared.state, true).await;
+        assert!(
+            shared.gateway.sites().is_empty(),
+            "a shared Caddy keeps serving the domain as before"
+        );
+    }
+
+    #[tokio::test]
+    async fn one_shot_cron_containers_are_swept_only_once_they_have_exited() {
+        let e = TestEnv::new();
+        let labels = [("rustle.managed", "1"), ("rustle.kind", "cron")];
+        let running = e.runtime.add_foreign_container("rustle-cron-a", &labels);
+        let exited = e.runtime.add_foreign_container("rustle-cron-b", &labels);
+        e.runtime.stop(&exited, 1).await.unwrap();
+        let foreign = e
+            .runtime
+            .add_foreign_container("someone-else", &[("rustle.kind", "cron")]);
+        e.runtime.stop(&foreign, 1).await.unwrap();
+        sync(&e.state, false).await;
+        let ids: Vec<String> = e.runtime.containers().into_iter().map(|c| c.id).collect();
+        assert!(ids.contains(&running), "a running one-shot is left alone");
+        assert!(!ids.contains(&exited), "an exited one is removed");
+        assert!(
+            ids.contains(&foreign),
+            "containers we do not own are never touched"
         );
     }
 }

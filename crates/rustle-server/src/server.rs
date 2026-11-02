@@ -99,15 +99,15 @@ pub fn reconcile_interval(external: bool) -> Duration {
     Duration::from_secs(if external { 15 } else { 60 })
 }
 
-/// Log a change of the degraded state once, not on every pass.
-fn note_degraded(prev: &Option<String>, now: &Option<String>) {
+/// What to log when the degraded state changes (nothing when it did not).
+fn degraded_transition(prev: &Option<String>, now: &Option<String>) -> Option<String> {
     if prev == now {
-        return;
+        return None;
     }
-    match now {
-        Some(m) => tracing::warn!("degraded: {m}"),
-        None => tracing::info!("recovered"),
-    }
+    Some(match now {
+        Some(m) => format!("degraded: {m}"),
+        None => "recovered".to_string(),
+    })
 }
 
 async fn reconcile_loop(st: Arc<AppState>, mut hup: Option<tokio::signal::unix::Signal>) {
@@ -126,7 +126,11 @@ async fn reconcile_loop(st: Arc<AppState>, mut hup: Option<tokio::signal::unix::
             }
         }
         let r = reconcile::sync(&st, false).await;
-        note_degraded(&st.degraded(), &r);
+        match degraded_transition(&st.degraded(), &r) {
+            Some(m) if r.is_some() => tracing::warn!("{m}"),
+            Some(m) => tracing::info!("{m}"),
+            None => {}
+        }
         st.set_degraded(r);
     }
 }
@@ -288,9 +292,15 @@ mod tests {
             "0"
         );
         assert!(!d.path().join("update-pending").exists());
-        note_degraded(&None, &Some("x".into()));
-        note_degraded(&Some("x".into()), &None);
-        note_degraded(&None, &None);
+        let (a, b) = (Some("x".to_string()), Some("y".to_string()));
+        assert_eq!(
+            degraded_transition(&None, &a).as_deref(),
+            Some("degraded: x")
+        );
+        assert_eq!(degraded_transition(&a, &b).as_deref(), Some("degraded: y"));
+        assert_eq!(degraded_transition(&a, &None).as_deref(), Some("recovered"));
+        assert_eq!(degraded_transition(&None, &None), None);
+        assert_eq!(degraded_transition(&a, &a), None);
     }
 
     #[test]
@@ -375,5 +385,51 @@ mod tests {
         tx.send(()).unwrap();
         h.await.unwrap().unwrap();
         assert!(!sock.exists(), "socket removed on shutdown");
+    }
+
+    #[tokio::test]
+    async fn background_reconcile_runs_after_start() {
+        let d = tempfile::tempdir().unwrap();
+        let mut c = cfg(d.path());
+        crate::cli::init(&c, false).unwrap();
+        // a deployment left half-done by a crash
+        {
+            let st = Store::open(&c.db_path).unwrap();
+            let t = crate::util::now();
+            st.insert_site(&crate::store::SiteRow {
+                id: "s1".into(),
+                name: "blog".into(),
+                domain: "blog.example.com".into(),
+                image_repo: "ghcr.io/o/blog".into(),
+                container_port: 3000,
+                ram_limit_mb: 128,
+                status: "deploying".into(),
+                current_deployment_id: None,
+                registry_id: None,
+                zero_downtime: false,
+                compat_caps: false,
+                created_at: t,
+                updated_at: t,
+            })
+            .unwrap();
+        }
+        c.local_bind = Some("127.0.0.1:0".into());
+        let (tx, rx) = tokio::sync::oneshot::channel::<()>();
+        let h = tokio::spawn(run_until(c.clone(), async move {
+            let _ = rx.await;
+        }));
+        // boot reconcile turns "deploying" with no deployment into "failed"
+        let st = Store::open(&c.db_path).unwrap();
+        let mut status = String::new();
+        for _ in 0..250 {
+            status = st.get_site("s1").unwrap().unwrap().status;
+            if status == "failed" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(status, "failed", "the boot reconcile ran in the background");
+        tx.send(()).unwrap();
+        h.await.unwrap().unwrap();
     }
 }

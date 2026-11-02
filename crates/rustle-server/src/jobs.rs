@@ -1058,4 +1058,58 @@ mod tests {
             (Some(1), "unknown system job 'nonexistent'")
         );
     }
+
+    #[tokio::test]
+    async fn prune_reports_the_bytes_it_reclaimed() {
+        let e = TestEnv::new();
+        e.runtime.add_image("sha256:a", &[]);
+        e.runtime.add_image("sha256:b", &[]);
+        let r = prune_images(&e.state).await.unwrap();
+        assert_eq!(r.images_deleted, 2);
+        assert_eq!(r.reclaimed_bytes, 2000, "each fake image is 1000 bytes");
+    }
+
+    #[tokio::test]
+    async fn site_http_log_is_capped_at_8_kib() {
+        use crate::testutil::MockHttp;
+        let m = MockHttp::start(|r| match r.path.as_str() {
+            "/exact" => (200, vec![], "z".repeat(8 * 1024 - 4)),
+            _ => (200, vec![], "z".repeat(20 * 1024)),
+        })
+        .await;
+        let t = crate::httpc::Target::Tcp(m.addr.clone());
+        let (_, log) = call_site_http(&t, "/big", None).await;
+        assert_eq!(
+            log.len(),
+            "200 ".len() + 8 * 1024,
+            "body cut at 8 KiB: {}",
+            log.len()
+        );
+        let (_, log) = call_site_http(&t, "/exact", None).await;
+        assert_eq!(log.len(), 4 + 8 * 1024 - 4);
+    }
+
+    #[tokio::test]
+    async fn one_shot_runs_need_ram_limit_plus_64_mb_free() {
+        let e = TestEnv::new();
+        let site = deployed_site(&e).await; // 128 MB limit
+        let set_free = |mb: u64| {
+            std::fs::write(
+                e.state.cfg.proc_root.join("meminfo"),
+                format!("MemTotal: 1015808 kB\nMemAvailable: {} kB\n", mb * 1024),
+            )
+            .unwrap();
+        };
+        let j = job(&site.id, &["node", "x.js"]);
+        set_free(128 + 63);
+        let (c, l) = run_site_job(&e.state, &j).await;
+        assert_eq!(c, Some(-1));
+        assert!(l.contains("not enough free RAM"), "{l}");
+        set_free(128 + 64);
+        let (_, l) = run_site_job(&e.state, &j).await;
+        assert!(
+            !l.contains("not enough free RAM"),
+            "exactly the requirement is enough: {l}"
+        );
+    }
 }

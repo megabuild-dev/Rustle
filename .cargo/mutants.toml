@@ -9,4 +9,7 @@ exclude_re = [
   "replace tune_allocator with \\(\\)",
   "replace init_logging with \\(\\)",
   "replace serve -> u8 with",
+  # Needs a real SIGTERM / SIGINT delivered to the process; covered by the systemd and e2e scripts.
+  "replace shutdown_signal with \\(\\)",
+  "replace run -> Result<\\(\\), String> with Ok\\(\\(\\)\\)",
 ]
