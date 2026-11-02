@@ -66,3 +66,10 @@ findings were fixed with tests (see `docs/DECISIONS_ADDENDUM.md`). Known leftove
 `rustle import-site-ctl`, HTTP cron jobs and route headers are implemented and unit-tested. Not supported: `www` redirects, the
 persistent `.next/cache` volume, custom health-check paths (see `docs/COEXISTENCE.md`).
 
+
+## Test quality (see docs/QUALITY.md)
+
+* 293 unit/API tests; CRAP score below 30 for all 542 functions (CI gate `crap`).
+* Mutation testing over the whole `rustle-server` crate (about 3,000 mutants): every survivor fixed with a
+  test or documented (one equivalent mutant, non-terminating-loop mutants, and side-effect-only functions
+  excluded in `.cargo/mutants.toml`). Weekly workflow `quality.yml` re-runs it.
