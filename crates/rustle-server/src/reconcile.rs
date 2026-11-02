@@ -565,4 +565,34 @@ mod tests {
             "containers we do not own are never touched"
         );
     }
+
+    #[tokio::test]
+    async fn a_container_without_an_address_needs_a_caddy_that_resolves_names() {
+        // host Caddy: no address => the route is left alone
+        let e = TestEnv::external();
+        let s = mk(&e, "blog").await;
+        webhook(&e.state, &s, "ghcr.io/o/blog:1").unwrap();
+        e.state.deployer.wait_idle(&s.id).await;
+        let cid = e.runtime.containers()[0].id.clone();
+        let before = e.gateway.sites()["blog"].clone();
+        e.runtime.set_ip(&cid, "");
+        e.gateway.wipe();
+        sync(&e.state, false).await;
+        assert!(
+            e.gateway.sites().is_empty(),
+            "no address, nothing to point at"
+        );
+        assert_ne!(before.1, "");
+        // container Caddy on the same network: the name is enough
+        let n = TestEnv::external_names();
+        let s = mk(&n, "blog").await;
+        webhook(&n.state, &s, "ghcr.io/o/blog:1").unwrap();
+        n.state.deployer.wait_idle(&s.id).await;
+        let cid = n.runtime.containers()[0].id.clone();
+        let name = n.runtime.containers()[0].spec.name.clone();
+        n.runtime.set_ip(&cid, "");
+        n.gateway.wipe();
+        sync(&n.state, false).await;
+        assert_eq!(n.gateway.sites()["blog"].1, format!("{name}:3000"));
+    }
 }

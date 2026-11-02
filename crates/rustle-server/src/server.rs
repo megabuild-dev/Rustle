@@ -99,14 +99,20 @@ pub fn reconcile_interval(external: bool) -> Duration {
     Duration::from_secs(if external { 15 } else { 60 })
 }
 
-/// What to log when the degraded state changes (nothing when it did not).
-fn degraded_transition(prev: &Option<String>, now: &Option<String>) -> Option<String> {
+/// A change of the degraded state worth logging.
+#[derive(Debug, PartialEq, Eq)]
+enum Transition {
+    Degraded(String),
+    Recovered,
+}
+
+fn degraded_transition(prev: &Option<String>, now: &Option<String>) -> Option<Transition> {
     if prev == now {
         return None;
     }
     Some(match now {
-        Some(m) => format!("degraded: {m}"),
-        None => "recovered".to_string(),
+        Some(m) => Transition::Degraded(m.clone()),
+        None => Transition::Recovered,
     })
 }
 
@@ -127,8 +133,8 @@ async fn reconcile_loop(st: Arc<AppState>, mut hup: Option<tokio::signal::unix::
         }
         let r = reconcile::sync(&st, false).await;
         match degraded_transition(&st.degraded(), &r) {
-            Some(m) if r.is_some() => tracing::warn!("{m}"),
-            Some(m) => tracing::info!("{m}"),
+            Some(Transition::Degraded(m)) => tracing::warn!("degraded: {m}"),
+            Some(Transition::Recovered) => tracing::info!("recovered"),
             None => {}
         }
         st.set_degraded(r);
@@ -294,11 +300,14 @@ mod tests {
         assert!(!d.path().join("update-pending").exists());
         let (a, b) = (Some("x".to_string()), Some("y".to_string()));
         assert_eq!(
-            degraded_transition(&None, &a).as_deref(),
-            Some("degraded: x")
+            degraded_transition(&None, &a),
+            Some(Transition::Degraded("x".into()))
         );
-        assert_eq!(degraded_transition(&a, &b).as_deref(), Some("degraded: y"));
-        assert_eq!(degraded_transition(&a, &None).as_deref(), Some("recovered"));
+        assert_eq!(
+            degraded_transition(&a, &b),
+            Some(Transition::Degraded("y".into()))
+        );
+        assert_eq!(degraded_transition(&a, &None), Some(Transition::Recovered));
         assert_eq!(degraded_transition(&None, &None), None);
         assert_eq!(degraded_transition(&a, &a), None);
     }

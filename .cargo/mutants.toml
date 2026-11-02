@@ -12,4 +12,7 @@ exclude_re = [
   # Needs a real SIGTERM / SIGINT delivered to the process; covered by the systemd and e2e scripts.
   "replace shutdown_signal with \\(\\)",
   "replace run -> Result<\\(\\), String> with Ok\\(\\(\\)\\)",
+  # Without the `dev-fakes` feature the wrapper always returns "off"; its logic is tested through
+  # dev_flags_if, and the feature build is exercised by the CI smoke job.
+  "replace dev_flags -> \\(bool, bool, Option<String>\\) with \\(false, false, None\\)",
 ]

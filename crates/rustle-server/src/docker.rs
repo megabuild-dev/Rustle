@@ -885,7 +885,8 @@ impl Runtime for FakeRuntime {
             },
             exit_code: c.exit_code,
             oom_killed: false,
-            ip: Some(c.ip.clone()),
+            // like the real daemon: a container that is not on our network has no address
+            ip: Some(c.ip.clone()).filter(|ip| !ip.is_empty()),
             image_id: c.spec.image.clone(),
             labels: c.spec.labels.clone(),
         })
