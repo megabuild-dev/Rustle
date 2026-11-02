@@ -1139,4 +1139,51 @@ mod tests {
         let s2 = Store::open(&dest).unwrap();
         assert_eq!(s2.setting("x").unwrap().as_deref(), Some("1"));
     }
+
+    #[test]
+    fn connection_pragmas_keep_memory_and_durability_settings() {
+        let d = tempfile::tempdir().unwrap();
+        let s = Store::open(&d.path().join("p.db")).unwrap();
+        let c = s.c();
+        let int = |name: &str| -> i64 {
+            c.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        let text = |name: &str| -> String {
+            c.query_row(&format!("PRAGMA {name}"), [], |r| r.get(0))
+                .unwrap()
+        };
+        assert_eq!(text("journal_mode"), "wal");
+        assert_eq!(int("synchronous"), 1, "NORMAL");
+        assert_eq!(int("foreign_keys"), 1);
+        assert_eq!(int("cache_size"), -512, "512 KiB page cache");
+        assert_eq!(int("mmap_size"), 0, "no memory-mapped I/O");
+        assert_eq!(int("journal_size_limit"), 4 * 1024 * 1024);
+        assert_eq!(int("busy_timeout"), 5000);
+    }
+
+    #[test]
+    fn site_flags_round_trip_independently() {
+        let s = Store::open_memory().unwrap();
+        let mut a = site("1", "a", "a.example.com", 64);
+        a.zero_downtime = true;
+        let mut b = site("2", "b", "b.example.com", 64);
+        b.compat_caps = true;
+        s.insert_site(&a).unwrap();
+        s.insert_site(&b).unwrap();
+        s.insert_site(&site("3", "c", "c.example.com", 64)).unwrap();
+        let get = |id: &str| s.get_site(id).unwrap().unwrap();
+        assert_eq!(
+            (get("1").zero_downtime, get("1").compat_caps),
+            (true, false)
+        );
+        assert_eq!(
+            (get("2").zero_downtime, get("2").compat_caps),
+            (false, true)
+        );
+        assert_eq!(
+            (get("3").zero_downtime, get("3").compat_caps),
+            (false, false)
+        );
+    }
 }

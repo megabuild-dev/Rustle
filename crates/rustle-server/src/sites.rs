@@ -1198,4 +1198,104 @@ mod tests {
         assert!(validate_env(&[var("1BAD", "1")]).is_err());
         assert!(validate_env(&[]).is_ok());
     }
+
+    #[tokio::test]
+    async fn budget_boundary_is_inclusive() {
+        let e = TestEnv::new();
+        let s = &*e.state;
+        s.store.set_setting("budget_override_mb", "512").unwrap();
+        let mut r = req("a", "a.example.com", 512);
+        r.override_budget = false;
+        create_site(s, r).await.unwrap(); // exactly the budget
+        let mut r = req("b", "b.example.com", 64);
+        r.override_budget = false;
+        let err = create_site(s, r).await.unwrap_err();
+        assert_eq!(err.code, "budget_exceeded");
+        s.store.set_setting("budget_override_mb", "576").unwrap();
+        let mut r = req("b", "b.example.com", 64);
+        r.override_budget = false;
+        create_site(s, r).await.unwrap();
+    }
+
+    #[test]
+    fn helper_formats_and_hashes() {
+        assert_eq!(placeholder_dial("blog", 3000), "rustle-blog-pending:3000");
+        assert_eq!(dial("c", 80), "c:80");
+        assert_eq!(
+            token_hash_hex("abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+    }
+
+    #[tokio::test]
+    async fn container_port_updates_are_validated() {
+        let e = TestEnv::new();
+        let s = &*e.state;
+        let site = create_site(s, req("a", "a.example.com", 128))
+            .await
+            .unwrap();
+        let upd = |p: u16| UpdateSiteReq {
+            container_port: Some(p),
+            ..Default::default()
+        };
+        assert!(update_site(s, &site.id, upd(0)).await.is_err());
+        assert_eq!(
+            update_site(s, &site.id, upd(8080))
+                .await
+                .unwrap()
+                .container_port,
+            8080
+        );
+        assert_eq!(
+            update_site(s, &site.id, upd(1))
+                .await
+                .unwrap()
+                .container_port,
+            1
+        );
+        assert_eq!(
+            update_site(s, &site.id, upd(65535))
+                .await
+                .unwrap()
+                .container_port,
+            65535
+        );
+    }
+
+    #[test]
+    fn registry_input_limits_are_exact() {
+        let e = TestEnv::new();
+        let s = &*e.state;
+        let mk = |name: &str, user: &str, secret: &str| CreateRegistryReq {
+            name: name.into(),
+            username: user.into(),
+            secret: secret.into(),
+        };
+        let long = "s".repeat(512);
+        assert!(create_registry(s, mk("ok", "me", "12345678")).is_ok());
+        assert!(create_registry(s, mk(&"n".repeat(64), "me", &long)).is_ok());
+        for (n, u, sec) in [
+            ("", "me", "12345678"),
+            ("   ", "me", "12345678"),
+            ("n", "", "12345678"),
+            ("n", "  ", "12345678"),
+            ("n", "me", "1234567"),
+            ("n", "me", &"s".repeat(513)),
+        ] {
+            assert!(
+                create_registry(s, mk(n, u, sec)).is_err(),
+                "{n:?} {u:?} {}",
+                sec.len()
+            );
+        }
+        assert!(create_registry(s, mk(&"n".repeat(65), "me", "12345678")).is_err());
+        let r = create_registry(s, mk("  trimmed  ", "  me  ", "12345678")).unwrap();
+        assert_eq!((r.name.as_str(), r.username.as_str()), ("trimmed", "me"));
+        // deleting
+        assert!(delete_registry(s, &r.id).is_ok());
+        assert_eq!(
+            delete_registry(s, &r.id).unwrap_err().status,
+            axum::http::StatusCode::NOT_FOUND
+        );
+    }
 }
