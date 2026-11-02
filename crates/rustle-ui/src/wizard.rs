@@ -168,7 +168,8 @@ pub fn Wizard() -> impl IntoView {
                                 <div class="code"><div class="code-head"><span>"RUSTLE_TOKEN (shown once)"</span><button class="ghost sm" on:click={let t = token.clone(); move |_| { crate::common::copy_text(&t); ctx.ok("Copied"); }}>"Copy"</button></div><pre>{token.clone()}</pre></div>
                                 <p class="muted small">"RUSTLE_URL = the address you use to open this dashboard, e.g. https://admin.example.com"</p>
                                 <Code title=".github/workflows/deploy.yml" text=wf.workflow_yaml/>
-                                <Code title="Dockerfile (optional, Next.js standalone)" text=wf.dockerfile/>
+                                <Code title="Dockerfile (optional, Next.js with Node: output standalone)" text=wf.dockerfile/>
+                                <Code title="Dockerfile (optional, Next.js static export: output export)" text=wf.dockerfile_static/>
                             </div>
                         })}
                     </Show>

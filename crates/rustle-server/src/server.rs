@@ -71,6 +71,8 @@ pub async fn run(cfg: Config) -> Result<(), String> {
     let app = api::router(state.clone());
 
     // Background: boot reconcile, periodic reconcile, scheduler.
+    // Registered first: an unhandled SIGHUP would terminate the process.
+    let mut hup = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::hangup()).ok();
     {
         let st = state.clone();
         tokio::spawn(async move {
@@ -78,10 +80,19 @@ pub async fn run(cfg: Config) -> Result<(), String> {
             if let Some(r) = &reason {
                 tracing::error!("degraded at boot: {r}");
             }
-            let mut tick = tokio::time::interval(Duration::from_secs(60));
+            // A shared Caddy is reloaded by its owner's own tooling, which drops Rustle's routes:
+            // look more often there (a local GET per pass, cheap).
+            let secs = if st.cfg.gateway_external { 15 } else { 60 };
+            let mut tick = tokio::time::interval(Duration::from_secs(secs));
             tick.tick().await;
             loop {
-                tick.tick().await;
+                // `systemctl kill -s HUP rustle` right after a Caddy reload restores routes at once.
+                tokio::select! {
+                    _ = tick.tick() => {}
+                    _ = async { match hup.as_mut() { Some(h) => { h.recv().await; } None => std::future::pending().await } } => {
+                        tracing::info!("SIGHUP: re-syncing routes");
+                    }
+                }
                 let r = reconcile::sync(&st, false).await;
                 if r != st.degraded() {
                     match &r {

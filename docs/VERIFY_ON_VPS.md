@@ -38,4 +38,8 @@ through the rest on a fresh Ubuntu 24.04 VPS (1 vCPU / 1 GB).
 | 30 | `caddy reload` drops Rustle's routes and Rustle restores them (within 60 s, immediately after `systemctl restart rustle`) | reload while a site is live | n/a |
 | 31 | Container IP changes after `docker restart` / reboot are picked up; the old address never serves another site | reboot with 3 sites, compare each domain's content | Pin per-site container addresses |
 | 32 | Installing next to a Docker that runs other containers does not restart Docker | `docker ps` uptime before/after | n/a |
+| 33 | A Caddy container with `admin unix//run/rustle/caddy-admin.sock|0666` and `/run/rustle` mounted is reachable by Rustle (user `rustle`) and not by containers on `rustle-net` | `curl --unix-socket` from the host as `rustle`; from a tenant container | Check directory mode `0750` and the socket mode |
+| 34 | The Caddy container, joined to `rustle-net`, resolves Rustle container names and reaches the dashboard through `unix//run/rustle/rustle.sock` | open a migrated site and the dashboard domain | n/a |
+| 35 | `systemctl kill -s HUP rustle` after `caddy reload` restores routes immediately; no SIGHUP before the handler is installed can kill Rustle | reload, then request a Rustle-managed domain | n/a |
+| 36 | A static-export image (`FROM caddy:2-alpine`, listens on 3000) runs under `cap_drop=ALL`, `no-new-privileges` and a 64 MB limit and passes the health check | deploy `Dockerfile.static.tmpl`'s image | Enable `compat_caps` for that site |
 

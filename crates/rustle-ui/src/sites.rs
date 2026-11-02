@@ -477,7 +477,8 @@ fn Ci(site: SiteDto) -> impl IntoView {
                 Err(e) => view! { <p class="err">{e.to_string()}</p> }.into_any(),
                 Ok(w) => view! {
                     <Code title=".github/workflows/deploy.yml" text=w.workflow_yaml/>
-                    <Code title="Dockerfile (Next.js standalone)" text=w.dockerfile/>
+                    <Code title="Dockerfile (Next.js with a Node server: output standalone)" text=w.dockerfile/>
+                    <Code title="Dockerfile (Next.js static export: output export, served by Caddy, about 64 MB RAM)" text=w.dockerfile_static/>
                 }.into_any(),
             })}
         </Suspense>

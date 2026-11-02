@@ -1,64 +1,98 @@
 # Installing Rustle on a server that already runs sites and Caddy
 
-Typical case: a VPS with two Next.js sites (built by GitHub Actions) behind a Caddy installed with `apt`. Nothing
-is moved at install time. Rustle shares your Caddy, and you migrate the sites one at a time whenever you like.
+Rustle can share the Caddy that is already there. Nothing of yours is moved or restarted at install time, and you migrate sites one
+at a time whenever you like. Two layouts are supported:
 
-## 1. Before you install
+| Your Caddy | Rustle reaches your containers by | What you change in your stack |
+|---|---|---|
+| **A container** (Docker Compose, `caddy:2-alpine`) | container name, over the shared `rustle-net` network | three small edits, below |
+| **A host service** (`apt install caddy`) | container IP | nothing (its admin API on `127.0.0.1:2019` is on by default) |
 
-```bash
-curl -s http://127.0.0.1:2019/config/ | head -c 300     # Caddy's admin API must answer (it does by default)
-systemctl is-active caddy; docker ps --format '{{.Names}} {{.Ports}}' | grep -i caddy
-```
-If the admin API does not answer, your Caddyfile probably has `admin off`, or Caddy runs in a container that does not publish
-`127.0.0.1:2019` (publish it, and set `admin 0.0.0.0:2019` in the container's global options).
+The installer detects which one you have: `docker ps --filter publish=443` for a container, `systemctl is-active caddy` for a service.
 
-## 2. Install in shared mode
+## A. Caddy as a container (Compose + `site-ctl.sh`)
+
+### 1. Install
 
 ```bash
 sudo ./install/install.sh --use-existing-caddy --domain rustle.example.com --email you@example.com
 ```
-Without `--use-existing-caddy` the installer notices Caddy and stops before changing anything.
+Without `--use-existing-caddy` the installer notices your Caddy and stops before changing anything. It never installs Docker again,
+never touches your swap or `ufw` rules, and does **not** restart Docker if it is already running containers (it only prints the
+recommended `daemon.json`). It adds: the `rustle` service, a socket-proxy container, the `rustle-net` and `rustle-docker` networks,
+and connects your Caddy container to `rustle-net` right away.
 
-What it does and does not do:
+### 2. The three changes in your stack
 
-| | |
-|---|---|
-| Your Caddy and Caddyfile | not modified, not restarted, not reloaded |
-| Your two sites | keep running exactly as before |
-| Docker | if it already runs containers, `daemon.json` is left alone and Docker is **not** restarted |
-| New things | the `rustle` service, a socket-proxy container, the `rustle-net` and `rustle-docker` networks, swap if there is none |
-| The dashboard | exposed through your Caddy only once it has a domain (point its A record at the server, then set it in Settings or pass `--domain`). Until then use `ssh -L 3000:127.0.0.1:3000 you@server` |
+Rustle shows "gateway unreachable" and keeps retrying until these are applied.
 
-Rustle adds routes to Caddy through its admin API with its own ids (`site-<name>`, `admin`). It never loads a whole configuration
-and never touches routes it did not create.
+```yaml
+# docker compose, caddy service
+    volumes:
+      - /run/rustle:/run/rustle          # Rustle's socket, and Caddy's admin socket for Rustle
+    networks: [default, rustle-net]
+# top level
+networks:
+  rustle-net:
+    external: true
+```
+```caddyfile
+# global options block of the generated Caddyfile (merge with the one you have)
+{
+    admin unix//run/rustle/caddy-admin.sock|0666
+}
+```
+The admin API moves from `localhost:2019` (inside the container) to a unix socket that only the `rustle` user (and root) can reach:
+containers on `rustle-net` cannot touch it. Then apply as usual (`docker compose up -d caddy`) and check:
+```bash
+curl --unix-socket /run/rustle/caddy-admin.sock http://127.0.0.1/config/ | head -c 200
+```
 
-## 3. Move a site into Rustle (zero downtime)
+### 3. Keep Rustle's routes across your reloads
 
-For each Next.js site:
+`site-ctl.sh` runs `caddy reload`, which rebuilds the configuration from your Caddyfile and therefore drops the routes Rustle added
+through the API. Rustle puts them back by itself within 15 seconds; to make it immediate add one line after the reload in `site-ctl.sh`:
+```bash
+docker compose exec -T caddy caddy reload --config /etc/caddy/Caddyfile
+systemctl kill -s HUP rustle 2>/dev/null || true     # Rustle re-syncs its routes now
+```
+Only sites managed by Rustle are affected by that window; your own sites are served by the Caddyfile and never interrupted.
 
-1. In Rustle: **Add site** with the site's real domain and its GHCR image repository (`ghcr.io/you/app`). Creating the site does
-   **not** touch traffic: the old site keeps answering.
-2. Open the site's CI/CD tab. Replace your current deploy workflow with the generated one, add the two secrets
-   (`RUSTLE_URL`, `RUSTLE_TOKEN`), and use the generated Dockerfile if you do not have one (needs `output: "standalone"`).
-3. Push. GitHub builds the image, Rustle pulls it, starts the container, waits until it is healthy and **then** adds the route in
-   front of the old one. Traffic flips in one step.
-4. When happy, remove the old site block from the Caddyfile and stop the old process (pm2/systemd/etc.). Then run
-   `sudo caddy reload --config /etc/caddy/Caddyfile && sudo systemctl restart rustle`. The restart re-adds Rustle's routes
-   immediately (otherwise Rustle does it within a minute).
-5. Roll back at any time: delete the site in Rustle and the old block in the Caddyfile (if you kept it) serves again.
+### 4. Move a site into Rustle (zero downtime)
 
-Memory: Rustle measures the memory already in use when it is installed (including your existing sites) and subtracts it from
-the budget for new sites. After you stop the old processes, raise the budget in Settings > RAM budget.
+For each site:
 
-## 4. Things to know
+1. **Add site** in Rustle with the site's real domain and a GHCR image repository (`ghcr.io/you/app`). Creating the site does **not**
+   touch traffic: your current site keeps answering.
+2. Open the site's CI/CD tab. Replace your deploy workflow with the generated one, add the secrets `RUSTLE_URL` and `RUSTLE_TOKEN`.
+   Dockerfile:
+   * **Static export** (`output: "export"`): your `Dockerfile.static.tmpl` already works as is (Caddy serving `out/` on port 3000, which is
+     Rustle's default port). The tab also offers an equivalent. Give the site **64 MB** of RAM.
+   * **Next.js with a Node server** (`output: "standalone"`): use the other Dockerfile; 256 MB is a good start.
+3. Push. GitHub builds and pushes the image; Rustle pulls it, starts it, waits until it is healthy and only then adds its route in
+   front of your old one. Traffic flips in a single step.
+4. When satisfied, remove the old site from `caddy.d` and its container, and reload as usual. (If you keep the old definition it
+   simply takes over again if you delete the site in Rustle: that is your rollback.)
 
-* **Caddy reloads drop Rustle's routes.** `caddy reload` rebuilds the configuration from the Caddyfile, which does not contain
-  Rustle's routes. They come back within 60 seconds on their own, or at once with `systemctl restart rustle`. Same after an
-  `apt upgrade` that restarts Caddy.
-* **Containers are reached by IP.** A Caddy on the host cannot resolve Docker names, so Rustle gives it each container's
-  address and re-checks every minute (Docker may hand out different addresses after a reboot). For a short moment after a reboot
-  a stale address could point at another container; keep this in mind for sensitive sites.
-* **Several `:443` servers.** If your Caddy has more than one server on :443, set `RUSTLE_CADDY_SERVER=<name>` in
-  `/etc/rustle/rustle.env` (the name is in `curl -s localhost:2019/config/apps/http/servers`).
-* **Nginx, Apache, Traefik** are not supported as the shared proxy; use `--own-caddy` after freeing ports 80/443.
-* Unverified on a real server so far: see items 27-31 of [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).
+Memory: Rustle subtracts what is already in use at install time (your existing sites included) from the budget for new sites. After
+you retire the old containers, raise the budget in Settings > RAM budget.
+
+## B. Caddy as a host service (apt)
+
+```bash
+sudo ./install/install.sh --use-existing-caddy --domain rustle.example.com
+```
+Nothing to change in your stack. Rustle talks to `http://127.0.0.1:2019` (change with `--caddy-admin`) and gives Caddy each container's
+IP. A `caddy reload` drops Rustle's routes just like above: they return within 15 seconds, or immediately after
+`systemctl kill -s HUP rustle`. For a short moment after a reboot an old address could point at another container.
+
+## Things to know
+
+* Rustle never loads a whole configuration into your Caddy and never touches routes it did not create (all of its routes carry ids
+  `site-<name>` and `admin`).
+* The dashboard is exposed through your Caddy only once it has a domain (a catch-all route would swallow your other sites). Until
+  then: `ssh -L 3000:127.0.0.1:3000 you@server` and open `http://localhost:3000`.
+* Several `:443` servers in your Caddy: set `RUSTLE_CADDY_SERVER=<name>` in `/etc/rustle/rustle.env`
+  (`curl --unix-socket ... http://127.0.0.1/config/apps/http/servers` lists the names).
+* Nginx, Apache or Traefik on 80/443 are not supported as the shared proxy; use `--own-caddy` after freeing those ports.
+* Not yet verified against a real Caddyfile-built Caddy: see items 27-35 of [VERIFY_ON_VPS.md](VERIFY_ON_VPS.md).

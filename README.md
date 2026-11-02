@@ -20,7 +20,7 @@ sudo ./install/install.sh --domain admin.example.com --email you@example.com
 The installer creates swap, installs Docker, starts the socket proxy and Caddy, installs the signed-release binary, prints the
 **master key** (save it: without it backups cannot be restored) and the admin password, and starts the service.
 Without `--domain` the dashboard is served on `https://<server-ip>` with a self-signed certificate until you set one in Settings.
-Already running sites behind a Caddy? Use `--use-existing-caddy` (see [docs/COEXISTENCE.md](docs/COEXISTENCE.md)): your sites stay untouched.
+Already running sites behind a Caddy (host service or container)? Use `--use-existing-caddy` (see [docs/COEXISTENCE.md](docs/COEXISTENCE.md)): your sites stay untouched.
 Private repository? See [docs/RELEASING.md](docs/RELEASING.md).
 
 ## Documents

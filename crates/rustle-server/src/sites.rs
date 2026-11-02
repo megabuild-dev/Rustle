@@ -202,10 +202,10 @@ pub fn dial(container_name: &str, port: u16) -> String {
     format!("{container_name}:{port}")
 }
 
-/// How Caddy reaches a container. Rustle's own Caddy lives on `rustle-net` and resolves container
-/// names; a Caddy running on the host cannot, so it is given the container's IP.
+/// How Caddy reaches a container. A Caddy attached to `rustle-net` (Rustle's own, or a shared one running
+/// as a container) resolves container names; a Caddy running on the host cannot, so it is given the IP.
 pub fn upstream(state: &AppState, container_name: &str, ip: Option<&str>, port: u16) -> String {
-    match (state.cfg.gateway_external, ip) {
+    match (state.cfg.gateway_external && !state.cfg.gateway_names, ip) {
         (true, Some(ip)) => format!("{ip}:{port}"),
         _ => dial(container_name, port),
     }
@@ -620,6 +620,7 @@ pub fn workflow(state: &AppState, site_id: &str) -> AppResult<WorkflowResp> {
     Ok(WorkflowResp {
         workflow_yaml: workflow_yaml(&s.image_repo, ip_mode),
         dockerfile: dockerfile(s.container_port),
+        dockerfile_static: dockerfile_static(s.container_port),
     })
 }
 
@@ -675,6 +676,36 @@ jobs:
             -d '{{"image": "${{{{ env.IMAGE }}}}:${{{{ github.sha }}}}"}}'
 "#
     )
+}
+
+/// Static export image: the site is plain files, so the runtime image is just Caddy (about 10 MB of RAM
+/// per site) instead of a Node process.
+pub fn dockerfile_static(port: u16) -> String {
+    r#"# Next.js static export (`output: "export"`): no Node at runtime, files served by Caddy.
+FROM node:22-alpine AS build
+WORKDIR /app
+COPY package.json package-lock.json* ./
+RUN npm ci
+COPY . .
+ENV NEXT_TELEMETRY_DISABLED=1
+RUN npm run build
+
+FROM caddy:2-alpine
+RUN printf '{
+	admin off
+	auto_https off
+}
+:__PORT__ {
+	root * /srv
+	encode zstd gzip
+	try_files {path} {path}.html {path}/index.html
+	file_server
+}
+' > /etc/caddy/Caddyfile
+COPY --from=build /app/out /srv
+EXPOSE __PORT__
+"#
+    .replace("__PORT__", &port.to_string())
 }
 
 pub fn dockerfile(port: u16) -> String {
@@ -1082,6 +1113,14 @@ mod tests {
         assert!(!y.contains("--insecure"));
         assert!(workflow_yaml("ghcr.io/o/a", true).contains("--insecure"));
         assert!(dockerfile(8080).contains("PORT=8080") && dockerfile(8080).contains("EXPOSE 8080"));
+        let st = dockerfile_static(3000);
+        assert!(
+            st.contains(":3000 {")
+                && st.contains("EXPOSE 3000")
+                && st.contains("file_server")
+                && st.contains("FROM caddy:2-alpine")
+        );
+        assert!(!st.contains("__PORT__"));
         assert!(!y.contains("rt_"));
     }
 }

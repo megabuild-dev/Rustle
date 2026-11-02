@@ -629,6 +629,23 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shared_caddy_container_on_rustle_net_is_given_container_names() {
+        let e = TestEnv::external_names();
+        let s = site(&e, "blog", 256).await;
+        assert!(
+            e.gateway.sites().is_empty(),
+            "still no route before the first deploy"
+        );
+        deploy(&e, &s, "v1").await;
+        let name = e.runtime.containers()[0].spec.name.clone();
+        assert_eq!(
+            e.gateway.sites()["blog"].1,
+            format!("{name}:3000"),
+            "a container Caddy resolves names, no IP to go stale"
+        );
+    }
+
+    #[tokio::test]
     async fn second_deploy_is_stop_first_and_retires_old() {
         let e = TestEnv::new();
         let s = site(&e, "blog", 256).await;

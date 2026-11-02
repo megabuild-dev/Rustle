@@ -88,11 +88,23 @@ fi
 
 # ---- 0b. is there already a Caddy (or another web server) on this machine? ---------------------
 EXISTING=""
+CADDY_KIND=""        # host | container
+CADDY_CONTAINER=""
 if systemctl is-active --quiet caddy 2>/dev/null; then
   EXISTING="the 'caddy' system service"
-elif command -v docker >/dev/null 2>&1 && docker ps --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -i caddy | grep -qv '^rustle-caddy '; then
-  EXISTING="a Caddy container"
-elif ss -ltn 2>/dev/null | grep -Eq ':(80|443)[[:space:]]' && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx rustle-caddy; then
+  CADDY_KIND=host
+elif command -v docker >/dev/null 2>&1; then
+  c="$(docker ps --filter publish=443 --format '{{.Names}} {{.Image}}' 2>/dev/null | grep -v '^rustle-caddy ' | head -n 1 || true)"
+  if [ -n "$c" ]; then
+    CADDY_CONTAINER="${c%% *}"
+    case "$c" in
+      *caddy*) EXISTING="the Caddy container '$CADDY_CONTAINER'"; CADDY_KIND=container ;;
+      *) EXISTING="the container '$CADDY_CONTAINER' that publishes port 443 (it is not Caddy)" ;;
+    esac
+  fi
+fi
+if [ -z "$EXISTING" ] && ss -ltn 2>/dev/null | grep -Eq ':(80|443)[[:space:]]' \
+   && ! docker ps --format '{{.Names}}' 2>/dev/null | grep -qx rustle-caddy; then
   EXISTING="another program listening on port 80/443"
 fi
 if [ -n "$EXISTING" ] && [ -z "$CADDY_MODE" ]; then
@@ -103,8 +115,7 @@ Found $EXISTING.
 Rustle needs a Caddy to route traffic. Choose how, then re-run (nothing has been changed yet):
 
   --use-existing-caddy   Share your Caddy. Your current sites keep working exactly as they are; Rustle only adds
-                         and removes the routes of the sites it manages. Needs Caddy's admin API
-                         (default http://127.0.0.1:2019, override with --caddy-admin).
+                         and removes the routes of the sites it manages.
   --own-caddy            Run Rustle's own Caddy on ports 80/443. Only possible once those ports are free,
                          and your existing sites must be moved into Rustle first.
 
@@ -114,14 +125,18 @@ MSG
 fi
 if [ "$CADDY_MODE" = external ]; then
   case "$EXISTING" in
-    *"listening on port"*) die "--use-existing-caddy needs Caddy; the program on 80/443 is something else" ;;
+    *"not Caddy"*|*"listening on port"*) die "--use-existing-caddy needs Caddy; what holds ports 80/443 here is something else" ;;
   esac
+  if [ "$CADDY_KIND" = container ] && [ -z "${RUSTLE_CADDY_ADMIN:-}" ] && ! printf '%s' "$*" | grep -q -- --caddy-admin; then
+    CADDY_ADMIN="unix:///run/rustle/caddy-admin.sock"
+  fi
   if [ "$DRY" = 1 ]; then
     echo "+ check that Caddy's admin API answers at $CADDY_ADMIN"
+  elif [ "$CADDY_KIND" = container ]; then
+    echo "Caddy runs in a container: the admin socket and network are connected after the install (see the notes at the end)."
   else
     curl -fsS --max-time 3 "$CADDY_ADMIN/config/" >/dev/null 2>&1 || die "Caddy's admin API does not answer at $CADDY_ADMIN.
   apt-installed Caddy enables it on 127.0.0.1:2019 by default (check that your Caddyfile has no 'admin off').
-  For a Caddy container, publish that port on the host loopback (-p 127.0.0.1:2019:2019) and set 'admin 0.0.0.0:2019' in its global options.
   Use --caddy-admin to point Rustle somewhere else."
   fi
 fi
@@ -246,6 +261,11 @@ docker network inspect rustle-net >/dev/null 2>&1 || run docker network create -
 docker network inspect rustle-docker >/dev/null 2>&1 || run docker network create --subnet 172.31.0.0/29 rustle-docker
 if [ "$CADDY_MODE" = external ]; then
   echo "sharing the existing Caddy at $CADDY_ADMIN: not starting a Caddy container"
+  if [ "$CADDY_KIND" = container ] && [ -n "$CADDY_CONTAINER" ]; then
+    # Lets that Caddy resolve Rustle's container names right away. A recreate (docker compose up) drops it
+    # again unless the compose file lists rustle-net: see the notes printed at the end.
+    run docker network connect rustle-net "$CADDY_CONTAINER" 2>/dev/null || true
+  fi
 elif [ "$DRY" = 1 ]; then
   echo "+ $BIN caddy-config > /etc/rustle/caddy.json"
 else
@@ -278,9 +298,17 @@ fi
 log "systemd service"
 asset prestart.sh | write_file /usr/lib/rustle/prestart.sh 0755
 asset rustle.service | write_file /etc/systemd/system/rustle.service 0644
-if [ "$CADDY_MODE" = external ]; then
+if [ "$CADDY_MODE" = external ] && [ "$CADDY_KIND" = container ]; then
   write_file /etc/rustle/rustle.env 0640 <<CONF
-# Written by install.sh (shared-Caddy mode); re-running the installer rewrites it. No secrets here.
+# Written by install.sh (shared Caddy running as a container); re-running the installer rewrites it. No secrets here.
+RUSTLE_GATEWAY=external
+RUSTLE_GATEWAY_NAMES=1
+CADDY_ADMIN_URL=$CADDY_ADMIN
+RUSTLE_ADMIN_UPSTREAM=unix//run/rustle/rustle.sock
+CONF
+elif [ "$CADDY_MODE" = external ]; then
+  write_file /etc/rustle/rustle.env 0640 <<CONF
+# Written by install.sh (shared Caddy on the host); re-running the installer rewrites it. No secrets here.
 RUSTLE_GATEWAY=external
 CADDY_ADMIN_URL=$CADDY_ADMIN
 RUSTLE_ADMIN_UPSTREAM=127.0.0.1:3000
@@ -316,6 +344,42 @@ log "Waiting for the dashboard"
 if [ "$DRY" != 1 ]; then
   for _ in $(seq 1 40); do curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1 && break; sleep 1; done
   curl -fsS http://127.0.0.1:3000/healthz >/dev/null 2>&1 || { journalctl -u rustle -n 30 --no-pager; die "Rustle did not come up"; }
+fi
+if [ -n "$DOMAIN" ]; then
+  DASH="https://$DOMAIN"
+else
+  DASH="not exposed until you set a domain; use  ssh -L 3000:127.0.0.1:3000 you@server  ->  http://localhost:3000"
+fi
+if [ "$CADDY_MODE" = external ] && [ "$CADDY_KIND" = container ]; then
+  cat <<MSG
+
+Rustle is installed next to your Caddy container ($CADDY_CONTAINER), which it can reach only after three small changes
+to YOUR stack (nothing of yours was modified). Until then Rustle reports the gateway as unreachable and keeps retrying.
+
+1) docker compose, in the caddy service:
+     volumes:
+       - /run/rustle:/run/rustle
+     networks: [default, rustle-net]
+   and at the top level:
+     networks:
+       rustle-net:
+         external: true
+
+2) Caddyfile global options (merge with the block you already have):
+     {
+         admin unix//run/rustle/caddy-admin.sock|0666
+     }
+
+3) Apply them the way you normally do (docker compose up -d caddy), then check:  curl --unix-socket /run/rustle/caddy-admin.sock http://127.0.0.1/config/ | head -c 200
+
+Also add this line after the 'caddy reload' in your site-ctl.sh so Rustle's routes come back immediately after every reload:
+     systemctl kill -s HUP rustle
+
+Dashboard: $DASH
+See docs/COEXISTENCE.md.
+
+MSG
+  exit 0
 fi
 if [ "$CADDY_MODE" = external ]; then
   if [ -n "$DOMAIN" ]; then

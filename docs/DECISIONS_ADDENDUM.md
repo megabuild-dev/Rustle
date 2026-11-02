@@ -28,4 +28,6 @@ Made during implementation after review by an independent senior reviewer; each 
 | Cookie | `rustle_session` | `__Host-rustle_session` | A sibling subdomain (a tenant) must not be able to plant the cookie |
 | Job and log sizes | 64 KB per run | 16 KB per run; container logs read at most 256 KiB, `tail` at most 500 lines; image pull progress is streamed, never buffered | RAM and database growth (every backup carries the logs) |
 | Shared Caddy | not covered (Rustle always ran its own Caddy) | `RUSTLE_GATEWAY=external` (installer: `--use-existing-caddy`): route-by-`@id` only, never a whole-config load, server autodetected, containers reached by IP re-checked every minute, no route before the first deploy, dashboard exposed only with a domain | Servers that already run sites behind a Caddy (docs/COEXISTENCE.md) |
+| Shared Caddy as a container | n/a | `RUSTLE_GATEWAY_NAMES=1`: the Caddy joins `rustle-net` and is given container names; its admin API moves to a unix socket (unreachable from tenants); SIGHUP and a 15 s poll restore routes after the owner's `caddy reload` | A container Caddy cannot reach container IPs (separate bridges) and a TCP admin API on a shared network would be open to tenants |
+| Static-export sites | Node-only Dockerfile template | extra `Dockerfile` template (Caddy serving `out/`) | Static sites need about 64 MB, not a Node process |
 

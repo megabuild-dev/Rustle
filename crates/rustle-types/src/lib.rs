@@ -274,6 +274,9 @@ pub struct SettingsDto {
 pub struct WorkflowResp {
     pub workflow_yaml: String,
     pub dockerfile: String,
+    /// Next.js `output: "export"`: static files served by a tiny Caddy, no Node at runtime.
+    #[serde(default)]
+    pub dockerfile_static: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

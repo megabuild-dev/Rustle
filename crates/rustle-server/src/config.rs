@@ -39,6 +39,9 @@ pub struct Config {
     /// it then only adds/removes its own `@id` routes, never loads a whole configuration, and
     /// reaches containers by IP (the host cannot resolve Docker names).
     pub gateway_external: bool,
+    /// A shared Caddy that runs as a container attached to `rustle-net` resolves container names (like
+    /// Rustle's own Caddy); one on the host cannot and is given container IPs.
+    pub gateway_names: bool,
     /// Name of Caddy's HTTP server to add routes to (autodetected in external mode).
     pub caddy_server: Option<String>,
     /// Upstream string Caddy uses to reach Rustle (`unix//run/rustle/rustle.sock` or `host:port`).
@@ -96,6 +99,7 @@ impl Config {
                 }
             })),
             gateway_external,
+            gateway_names: get("RUSTLE_GATEWAY_NAMES").is_some_and(|v| v == "1"),
             caddy_server: get("RUSTLE_CADDY_SERVER"),
             admin_upstream,
             public_ip: get("RUSTLE_PUBLIC_IP"),
@@ -128,6 +132,7 @@ impl Config {
             docker: Endpoint::Tcp("127.0.0.1:1".into()),
             caddy_admin: Endpoint::Tcp("127.0.0.1:1".into()),
             gateway_external: false,
+            gateway_names: false,
             caddy_server: None,
             admin_upstream: "127.0.0.1:3000".into(),
             public_ip: None,

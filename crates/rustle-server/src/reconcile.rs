@@ -82,16 +82,16 @@ pub async fn sync(state: &AppState, full: bool) -> Option<String> {
             .and_then(|d| d.container_name.clone().zip(d.container_id.clone()))
         {
             Some((cname, cid)) => {
-                let ip = if external {
+                let mut ip = None;
+                if external {
                     match state.runtime.inspect(&cid).await {
-                        Ok(info) if info.running => info.ip,
-                        _ => None,
+                        Ok(info) if info.running => ip = info.ip,
+                        // Not running: leave whatever route exists untouched.
+                        _ => continue,
                     }
-                } else {
-                    None
-                };
-                if external && ip.is_none() {
-                    continue; // not running: leave whatever route exists untouched
+                    if ip.is_none() && !state.cfg.gateway_names {
+                        continue; // a host Caddy needs the address
+                    }
                 }
                 upstream(state, &cname, ip.as_deref(), s.container_port)
             }
