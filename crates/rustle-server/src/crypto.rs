@@ -130,7 +130,7 @@ impl MasterKey {
     }
 }
 
-#[cfg(unix)]
+/// Rustle is Linux-only (unix sockets, cgroups, systemd), so there is no portable fallback.
 fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::OpenOptionsExt;
@@ -140,11 +140,6 @@ fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
         .mode(0o600)
         .open(path)?;
     f.write_all(data)
-}
-
-#[cfg(not(unix))]
-fn write_secret_file(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    std::fs::write(path, data)
 }
 
 pub fn hmac_sha256(key: &[u8], data: &[u8]) -> Vec<u8> {

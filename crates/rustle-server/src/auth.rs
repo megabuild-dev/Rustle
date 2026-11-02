@@ -85,10 +85,7 @@ impl AuthState {
     /// Seconds the caller must wait before another attempt (0 = allowed now).
     pub fn login_wait(&self, ip: &str, at: i64) -> i64 {
         let m = self.backoff.lock().unwrap_or_else(|p| p.into_inner());
-        match m.get(ip) {
-            Some((_, next)) if *next > at => *next - at,
-            _ => 0,
-        }
+        m.get(ip).map_or(0, |(_, next)| (*next - at).max(0))
     }
 
     /// Records a failure and returns how many consecutive failures this client has.
@@ -571,5 +568,67 @@ mod tests {
         let signing = format!("{HEADER_B64}.{payload}");
         let sig = b64url(&hmac_sha256(&a.jwt_key, signing.as_bytes()));
         assert!(a.verify(&format!("{signing}.{sig}"), 5).is_none());
+    }
+
+    #[test]
+    fn boundaries_of_expiry_and_stale_windows() {
+        // entries whose penalty ends exactly now are expired, so a full table is purged
+        let a = st();
+        for i in 0..1024 {
+            a.login_failed(&format!("ip{i}"), 1000); // first failure: no delay, next == 1000
+        }
+        a.login_failed("newcomer", 1000);
+        assert_eq!(
+            a.backoff.lock().unwrap().len(),
+            1,
+            "expired-now entries are purged"
+        );
+        // rate limiter: a window that ended exactly now is stale; one that has not is kept
+        let r = RateLimiter::default();
+        for i in 0..513 {
+            r.allow(&format!("k{i}"), 5, 10, 0);
+        }
+        r.allow("probe", 5, 10, 10); // age == window => stale
+        assert_eq!(r.map.lock().unwrap().len(), 1);
+        let r = RateLimiter::default();
+        for i in 0..513 {
+            r.allow(&format!("k{i}"), 5, 10, 5);
+        }
+        r.allow("probe", 5, 10, 12); // age 7 < 10 => still counted
+        assert_eq!(r.map.lock().unwrap().len(), 514);
+    }
+
+    #[test]
+    fn ipv4_mapped_addresses_are_left_alone() {
+        assert_eq!(normalize_ip("::ffff:1.2.3.4"), "::ffff:1.2.3.4");
+        assert_eq!(normalize_ip("1.2.3.4"), "1.2.3.4");
+        assert_eq!(normalize_ip("not-an-ip"), "not-an-ip");
+        assert_eq!(normalize_ip("2001:db8::zz"), "2001:db8::zz");
+    }
+
+    #[tokio::test]
+    async fn deploy_token_error_messages_distinguish_shape_from_validity() {
+        use crate::app::TestEnv;
+        let e = TestEnv::new();
+        let hdr = |v: &str| {
+            let mut h = HeaderMap::new();
+            h.insert("authorization", v.parse().unwrap());
+            h
+        };
+        let msg = |v: &str| deploy_token(&e.state, &hdr(v)).unwrap_err().message;
+        assert_eq!(
+            msg("Bearer nope"),
+            "missing deploy token",
+            "wrong prefix is a shape error"
+        );
+        assert_eq!(
+            msg("Bearer rt_abc"),
+            "invalid deploy token",
+            "right shape, unknown token"
+        );
+        let ok_len = format!("Bearer rt_{}", "a".repeat(196)); // 199 chars of token
+        let too_long = format!("Bearer rt_{}", "a".repeat(197)); // 200 chars of token
+        assert_eq!(msg(&ok_len), "invalid deploy token");
+        assert_eq!(msg(&too_long), "missing deploy token");
     }
 }
