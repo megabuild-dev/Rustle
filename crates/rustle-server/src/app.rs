@@ -306,3 +306,61 @@ impl TestEnv {
         }
     }
 }
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+    use crate::testutil::MockHttp;
+
+    #[tokio::test]
+    async fn http_health_counts_anything_below_500_as_serving() {
+        for (code, want) in [
+            (200u16, true),
+            (301, true),
+            (404, true),
+            (499, true),
+            (500, false),
+            (503, false),
+        ] {
+            let m = MockHttp::start(move |_| (code, vec![], String::new())).await;
+            let (ip, port) = m.addr.rsplit_once(':').unwrap();
+            assert_eq!(
+                HttpHealth.probe(ip, port.parse().unwrap()).await,
+                want,
+                "{code}"
+            );
+            assert_eq!(m.requests()[0].path, "/");
+        }
+        assert!(!HttpHealth.probe("127.0.0.1", 1).await, "nothing listening");
+    }
+
+    #[tokio::test]
+    async fn fake_health_pops_the_script_then_uses_the_default() {
+        let h = FakeHealth::new(true);
+        h.script(vec![false, false, true]);
+        assert!(!h.probe("x", 1).await);
+        assert!(!h.probe("x", 1).await);
+        assert!(h.probe("x", 1).await);
+        assert!(h.probe("x", 1).await, "script exhausted: default");
+        h.default.store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!h.probe("x", 1).await);
+    }
+
+    #[tokio::test]
+    async fn system_resolver_resolves_localhost_and_survives_failures() {
+        let ips = SystemResolver.resolve("localhost").await;
+        assert!(ips.iter().any(|ip| ip.is_loopback()), "{ips:?}");
+        assert!(SystemResolver
+            .resolve("does-not-exist.invalid")
+            .await
+            .is_empty());
+    }
+
+    #[tokio::test]
+    async fn fake_resolver_returns_what_it_was_told() {
+        let r = FakeResolver::default();
+        assert!(r.resolve("a.example.com").await.is_empty());
+        r.set("a.example.com", &["1.2.3.4", "::1"]);
+        assert_eq!(r.resolve("a.example.com").await.len(), 2);
+    }
+}

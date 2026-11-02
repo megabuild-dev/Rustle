@@ -159,6 +159,18 @@ pub async fn run(state: &Arc<AppState>) -> Result<String, String> {
     result.map(|b| format!("uploaded {remote} ({b} bytes)"))
 }
 
+/// The whole file is held in memory (plain + ciphertext + base64): refuse when it is unreasonably large.
+fn check_size(len: usize) -> Result<(), String> {
+    if len > MAX_DB_BYTES {
+        return Err(format!(
+            "database is {} MiB, above the {} MiB backup limit",
+            len >> 20,
+            MAX_DB_BYTES >> 20
+        ));
+    }
+    Ok(())
+}
+
 async fn do_backup(
     state: &Arc<AppState>,
     cfg: &Stored,
@@ -183,14 +195,7 @@ async fn do_backup(
     let plain = tokio::fs::read(&tmp).await.map_err(|e| e.to_string());
     let _ = tokio::fs::remove_file(&tmp).await;
     let plain = plain?;
-    // The whole file is held in memory (plain + ciphertext + base64): refuse when it is unreasonably large.
-    if plain.len() > MAX_DB_BYTES {
-        return Err(format!(
-            "database is {} MiB, above the {} MiB backup limit",
-            plain.len() >> 20,
-            MAX_DB_BYTES >> 20
-        ));
-    }
+    check_size(plain.len())?;
     let enc = state.key.seal(&plain, AAD);
     state
         .github
@@ -475,5 +480,165 @@ mod tests {
         assert!(restore_to(&key, &blob, &d.path().join("x.db"), false)
             .unwrap_err()
             .contains("not a SQLite"));
+    }
+
+    #[test]
+    fn repo_names() {
+        for ok in [
+            "o/r",
+            "a-b_c.d/e",
+            &format!("{}/{}", "a".repeat(100), "b".repeat(100)),
+        ] {
+            assert!(valid_repo(ok), "{ok}");
+        }
+        for bad in [
+            "",
+            "o",
+            "o/",
+            "/r",
+            "o/r/x",
+            "o r/x",
+            "o/r$",
+            "o//r",
+            &format!("{}/b", "a".repeat(101)),
+            &format!("a/{}", "b".repeat(101)),
+        ] {
+            assert!(!valid_repo(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn branch_and_path_names() {
+        for ok in ["main", "rustle-backups", "a/b_c.d-e", &"a".repeat(100)] {
+            assert!(valid_branch_or_path(ok), "{ok}");
+        }
+        for bad in ["", "/abs", "a..b", "a b", "a:b", "a\\b", &"a".repeat(101)] {
+            assert!(!valid_branch_or_path(bad), "{bad}");
+        }
+    }
+
+    #[test]
+    fn size_limit_is_exactly_16_mib() {
+        assert_eq!(MAX_DB_BYTES, 16 * 1024 * 1024);
+        assert!(check_size(0).is_ok());
+        assert!(check_size(MAX_DB_BYTES).is_ok());
+        let e = check_size(MAX_DB_BYTES + 1).unwrap_err();
+        assert!(e.contains("16 MiB"), "{e}");
+        assert_eq!(KEEP, 14);
+    }
+
+    #[test]
+    fn restore_requires_a_real_sqlite_header() {
+        let key = crate::crypto::MasterKey::from_bytes([5; 32]);
+        let d = tempfile::tempdir().unwrap();
+        let dest = d.path().join("rustle.db");
+        let attempt = |plain: &[u8]| restore_to(&key, &key.seal(plain, AAD), &dest, true);
+        assert!(
+            attempt(b"SQLite format 3")
+                .unwrap_err()
+                .contains("not a SQLite"),
+            "15 bytes"
+        );
+        assert!(attempt(b"SQLite format 4\0")
+            .unwrap_err()
+            .contains("not a SQLite"));
+        assert!(attempt(b"short").unwrap_err().contains("not a SQLite"));
+        assert!(!dest.exists());
+        attempt(b"SQLite format 3\0").expect("16 bytes with the header is accepted");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"SQLite format 3\0");
+        // without --force an existing database is never replaced
+        let e = restore_to(
+            &key,
+            &key.seal(b"SQLite format 3\0 more", AAD),
+            &dest,
+            false,
+        )
+        .unwrap_err();
+        assert!(e.contains("already exists"), "{e}");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"SQLite format 3\0");
+        // a wrong key is reported as such
+        let other = crate::crypto::MasterKey::from_bytes([6; 32]);
+        let e = restore_to(&other, &key.seal(b"SQLite format 3\0", AAD), &dest, true).unwrap_err();
+        assert!(e.contains("wrong master key"), "{e}");
+    }
+
+    #[tokio::test]
+    async fn retention_only_touches_backup_files_and_keeps_the_newest() {
+        let (st, gh, _d) = file_env();
+        for i in 0..16 {
+            gh.put_file(
+                "t",
+                "o/r",
+                "main",
+                &format!("p/rustle-2026010{:02}.db.enc", i),
+                b"x",
+                "m",
+            )
+            .await
+            .unwrap();
+        }
+        for other in ["p/notes.txt", "p/rustle-keep.txt", "p/other.db.enc"] {
+            gh.put_file("t", "o/r", "main", other, b"x", "m")
+                .await
+                .unwrap();
+        }
+        let cfg = Stored {
+            enabled: true,
+            repo: "o/r".into(),
+            branch: "main".into(),
+            path_prefix: "p".into(),
+        };
+        do_backup(&st, &cfg, "t", "p/rustle-20260199.db.enc")
+            .await
+            .unwrap();
+        let files = gh.files();
+        let backups: Vec<&String> = files
+            .keys()
+            .filter(|k| k.starts_with("p/rustle-") && k.ends_with(".db.enc"))
+            .collect();
+        assert_eq!(backups.len(), KEEP, "newest {KEEP} remain");
+        assert!(
+            files.contains_key("p/rustle-20260199.db.enc"),
+            "the new one is kept"
+        );
+        assert!(
+            !files.contains_key("p/rustle-202601000.db.enc")
+                && !files.keys().any(|k| k == "p/rustle-20260100.db.enc")
+        );
+        for other in ["p/notes.txt", "p/rustle-keep.txt", "p/other.db.enc"] {
+            assert!(files.contains_key(other), "{other} must never be deleted");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_empty_token_in_the_form_keeps_the_stored_one() {
+        let (st, gh, _d) = file_env();
+        let cfg = |token: Option<&str>| BackupConfig {
+            enabled: true,
+            repo: "o/r".into(),
+            branch: String::new(),
+            path_prefix: String::new(),
+            token: token.map(String::from),
+            ..Default::default()
+        };
+        assert!(
+            set_config(&st, cfg(None)).await.is_err(),
+            "no token anywhere"
+        );
+        set_config(&st, cfg(Some("first-token"))).await.unwrap();
+        set_config(&st, cfg(Some(""))).await.unwrap();
+        set_config(&st, cfg(None)).await.unwrap();
+        set_config(&st, cfg(Some("second-token"))).await.unwrap();
+        set_config(&st, cfg(Some(""))).await.unwrap();
+        assert_eq!(
+            gh.tokens_seen(),
+            vec![
+                "first-token",
+                "first-token",
+                "first-token",
+                "second-token",
+                "second-token"
+            ]
+        );
     }
 }

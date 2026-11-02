@@ -28,6 +28,16 @@ fn mime(path: &str) -> &'static str {
     }
 }
 
+/// The bytes to serve for `path`: the embedded file, or a built-in notice page when the dashboard
+/// was not compiled into this binary.
+fn page_body(path: &str, file: Option<Vec<u8>>) -> Option<Vec<u8>> {
+    match file {
+        Some(f) => Some(f),
+        None if path == "index.html" => Some(FALLBACK_INDEX.as_bytes().to_vec()),
+        None => None,
+    }
+}
+
 fn accepts(headers: &HeaderMap, enc: &str) -> bool {
     headers
         .get(header::ACCEPT_ENCODING)
@@ -65,10 +75,8 @@ pub async fn serve(uri: Uri, headers: HeaderMap) -> Response {
         path = "index.html".into();
         file = Assets::get(&path);
     }
-    let plain: Vec<u8> = match file {
-        Some(f) => f.data.into_owned(),
-        None if path == "index.html" => FALLBACK_INDEX.as_bytes().to_vec(),
-        None => return StatusCode::NOT_FOUND.into_response(),
+    let Some(plain) = page_body(&path, file.map(|f| f.data.into_owned())) else {
+        return StatusCode::NOT_FOUND.into_response();
     };
     let mut builder = Response::builder()
         .header(header::CONTENT_TYPE, mime(&path))
@@ -134,5 +142,76 @@ mod tests {
         assert_ne!(r.status(), 500);
         let r = serve("/api/v1/nope".parse().unwrap(), HeaderMap::new()).await;
         assert_eq!(r.status(), 404);
+    }
+
+    #[test]
+    fn every_extension_has_its_type() {
+        for (f, t) in [
+            ("a.html", "text/html; charset=utf-8"),
+            ("a.js", "text/javascript; charset=utf-8"),
+            ("a.mjs", "text/javascript; charset=utf-8"),
+            ("a.wasm", "application/wasm"),
+            ("a.css", "text/css; charset=utf-8"),
+            ("a.json", "application/json"),
+            ("a.svg", "image/svg+xml"),
+            ("a.png", "image/png"),
+            ("a.ico", "image/x-icon"),
+            ("a.txt", "text/plain; charset=utf-8"),
+            ("a.bin", "application/octet-stream"),
+        ] {
+            assert_eq!(mime(f), t, "{f}");
+        }
+    }
+
+    #[test]
+    fn missing_dashboard_gets_the_notice_page_only_for_the_index() {
+        let notice = page_body("index.html", None).unwrap();
+        assert!(String::from_utf8(notice)
+            .unwrap()
+            .contains("not built into this binary"));
+        assert!(page_body("app.js", None).is_none());
+        assert_eq!(page_body("app.js", Some(b"x".to_vec())).unwrap(), b"x");
+    }
+
+    #[tokio::test]
+    async fn headers_encoding_and_path_rules() {
+        let get = |p: &'static str, br: bool| async move {
+            let mut h = HeaderMap::new();
+            if br {
+                h.insert(header::ACCEPT_ENCODING, "br".parse().unwrap());
+            }
+            serve(p.parse().unwrap(), h).await
+        };
+        // "/api" itself is not the app shell
+        assert_eq!(get("/api", false).await.status(), 404);
+        assert_eq!(
+            get("/apix", false).await.status(),
+            200,
+            "only api/ and api are reserved"
+        );
+        assert_eq!(get("/a\\b", false).await.status(), 400);
+        assert_eq!(get("/x/../y", false).await.status(), 400);
+        let r = get("/", false).await;
+        assert_eq!(
+            r.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+        assert_eq!(r.headers()[header::VARY], "accept-encoding");
+        assert!(r.headers().get(header::CONTENT_ENCODING).is_none());
+        // brotli only when asked for and available
+        let r = get("/", true).await;
+        assert_eq!(r.headers()[header::CONTENT_ENCODING], "br");
+        // hashed assets are cacheable
+        let js = Assets::iter()
+            .find(|f| f.ends_with(".js"))
+            .expect("a js asset in ui-dist");
+        let uri: &'static str = Box::leak(format!("/{js}").into_boxed_str());
+        let r = get(uri, false).await;
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.headers()[header::CACHE_CONTROL], "public, max-age=3600");
+        assert_eq!(
+            r.headers()[header::CONTENT_TYPE],
+            "text/javascript; charset=utf-8"
+        );
     }
 }

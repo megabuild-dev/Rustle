@@ -185,10 +185,8 @@ fn meta_value(meta: &str, key: &str) -> Option<String> {
 pub fn parse_env_file(text: &str) -> Vec<rustle_types::EnvVar> {
     let mut out: Vec<rustle_types::EnvVar> = Vec::new();
     for line in text.lines() {
+        // Blank lines and comments need no special case: neither has `KEY=` with a valid key.
         let line = line.trim_start();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
         let line = line.strip_prefix("export ").unwrap_or(line);
         let Some((k, v)) = line.split_once('=') else {
             continue;
@@ -718,5 +716,57 @@ mod tests {
     fn passwords_are_unambiguous() {
         let p = random_password(200);
         assert!(!p.contains(['0', 'O', 'l', 'I', '1']));
+    }
+
+    #[test]
+    fn env_files_comments_quotes_and_duplicates() {
+        let vars = parse_env_file(
+            "# A=1\n#B=2\n   # C=3\n\n  \nexport D=4\nE = 5\nF=\"q\"\nG='s'\nH=\"mismatch'\nI=\"\nJ=\nK=a b\nbad key=1\n9X=1\nL=1\nL=2\n",
+        );
+        let m: Vec<(&str, &str)> = vars
+            .iter()
+            .map(|v| (v.key.as_str(), v.value.as_str()))
+            .collect();
+        assert_eq!(
+            m,
+            vec![
+                ("D", "4"),
+                ("E", " 5"),
+                ("F", "q"),
+                ("G", "s"),
+                ("H", "\"mismatch'"),
+                ("I", "\""),
+                ("J", ""),
+                ("K", "a b"),
+                ("L", "2"),
+            ]
+        );
+    }
+
+    #[test]
+    fn caddy_config_ignores_blank_settings_and_uses_real_ones() {
+        let d = tempfile::tempdir().unwrap();
+        let c = cfg(d.path());
+        init(&c, false).unwrap();
+        let st = Store::open(&c.db_path).unwrap();
+        st.set_setting("admin_domain", "").unwrap();
+        st.set_setting("acme_email", "").unwrap();
+        st.set_setting("public_ip", "203.0.113.5").unwrap();
+        let blank = caddy_config(&c).unwrap();
+        assert!(blank.contains("203.0.113.5"), "IP mode: {blank}");
+        assert!(!blank.contains("\"email\""), "no empty ACME email: {blank}");
+        st.set_setting("admin_domain", "dash.example.com").unwrap();
+        st.set_setting("acme_email", "ops@example.com").unwrap();
+        let full = caddy_config(&c).unwrap();
+        assert!(
+            full.contains("dash.example.com") && full.contains("ops@example.com"),
+            "{full}"
+        );
+        // without a stored public IP the configured one is used
+        let mut c2 = c.clone();
+        c2.public_ip = Some("198.51.100.9".into());
+        st.delete_setting("public_ip").unwrap();
+        st.set_setting("admin_domain", "").unwrap();
+        assert!(caddy_config(&c2).unwrap().contains("198.51.100.9"));
     }
 }

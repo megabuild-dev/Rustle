@@ -305,6 +305,8 @@ fn resolve_location(current: &str, loc: &str) -> String {
 #[derive(Default)]
 struct FakeGhState {
     private: bool,
+    /// Tokens presented to `repo_private`, oldest first.
+    tokens: Vec<String>,
     files: BTreeMap<String, Vec<u8>>,
     release: ReleaseInfo,
     downloads: BTreeMap<String, Vec<u8>>,
@@ -334,6 +336,9 @@ impl FakeGithub {
     pub fn set_private(&self, p: bool) {
         self.st.lock().unwrap().private = p;
     }
+    pub fn tokens_seen(&self) -> Vec<String> {
+        self.st.lock().unwrap().tokens.clone()
+    }
     pub fn set_fail(&self, m: Option<&str>) {
         self.st.lock().unwrap().fail = m.map(String::from);
     }
@@ -361,8 +366,10 @@ impl FakeGithub {
 
 #[async_trait]
 impl Github for FakeGithub {
-    async fn repo_private(&self, _t: &str, _r: &str) -> GhResult<bool> {
-        Ok(self.chk()?.private)
+    async fn repo_private(&self, t: &str, _r: &str) -> GhResult<bool> {
+        let mut s = self.chk()?;
+        s.tokens.push(t.to_string());
+        Ok(s.private)
     }
     async fn put_file(
         &self,
