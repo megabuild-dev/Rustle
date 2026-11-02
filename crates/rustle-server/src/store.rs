@@ -1186,4 +1186,60 @@ mod tests {
             (false, false)
         );
     }
+
+    #[test]
+    fn delete_and_update_report_whether_anything_changed() {
+        let s = Store::open_memory().unwrap();
+        // registries
+        let r = RegistryRow {
+            id: "r1".into(),
+            name: "n".into(),
+            host: "ghcr.io".into(),
+            username: "u".into(),
+            secret_enc: vec![1],
+            created_at: 1,
+        };
+        s.insert_registry(&r).unwrap();
+        assert!(s.delete_registry("r1").unwrap());
+        assert!(!s.delete_registry("r1").unwrap());
+        assert!(!s.delete_registry("never").unwrap());
+        // sites
+        s.insert_site(&site("1", "a", "a.example.com", 64)).unwrap();
+        assert!(!s.delete_site("zzz").unwrap());
+        assert!(s.delete_site("1").unwrap());
+        assert!(!s.delete_site("1").unwrap());
+        // cron: user jobs can be deleted, updated by field, and unknown ids change nothing
+        let j = CronRow {
+            id: "u1".into(),
+            kind: "site".into(),
+            name: "mine".into(),
+            schedule: "0 * * * *".into(),
+            site_id: None,
+            argv_json: Some("[\"x\"]".into()),
+            enabled: true,
+            system_key: None,
+            last_fired_minute: None,
+        };
+        s.insert_cron(&j).unwrap();
+        assert!(
+            !s.update_cron("u1", None, None).unwrap(),
+            "nothing to change"
+        );
+        assert!(!s
+            .update_cron("nope", Some(true), Some("* * * * *"))
+            .unwrap());
+        assert!(s.update_cron("u1", None, Some("5 * * * *")).unwrap());
+        assert_eq!(s.get_cron("u1").unwrap().unwrap().schedule, "5 * * * *");
+        assert!(
+            s.get_cron("u1").unwrap().unwrap().enabled,
+            "schedule-only update keeps enabled"
+        );
+        assert!(s.update_cron("u1", Some(false), None).unwrap());
+        assert!(s.update_cron("u1", Some(true), Some("6 * * * *")).unwrap());
+        let got = s.get_cron("u1").unwrap().unwrap();
+        assert!(got.enabled && got.schedule == "6 * * * *");
+        assert!(!s.delete_cron("nope").unwrap());
+        assert!(s.delete_cron("u1").unwrap());
+        assert!(!s.delete_cron("u1").unwrap());
+    }
 }
