@@ -1735,7 +1735,11 @@ mod tests {
     async fn request_body_limits_are_exact() {
         let (_e, c) = logged_in().await;
         // login and webhook: 4 KiB
-        for path in ["/api/v1/auth/login", "/api/v1/webhooks/deploy"] {
+        for path in [
+            "/api/v1/auth/login",
+            "/api/v1/auth/password",
+            "/api/v1/webhooks/deploy",
+        ] {
             let ok = raw_body(&c, Method::POST, path, json_of_len("username", 4096)).await;
             assert_ne!(
                 ok.status,
