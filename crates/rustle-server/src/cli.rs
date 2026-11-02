@@ -871,7 +871,7 @@ mod tests {
             assert_eq!(p.ram, want, "{mem}");
             assert_eq!(
                 p.notes.iter().any(|n| n.contains("becomes")),
-                mem != "256" && mem != "" && want != mem.parse().unwrap_or(0),
+                mem != "256" && !mem.is_empty() && want != mem.parse().unwrap_or(0),
                 "{mem}"
             );
         }

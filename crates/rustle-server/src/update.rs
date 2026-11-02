@@ -9,7 +9,6 @@ use crate::error::{AppError, AppResult};
 use rustle_types::UpdateInfo;
 use std::sync::atomic::Ordering;
 use std::sync::Arc;
-use std::time::Duration;
 
 const MAX_BINARY: usize = 40 * 1024 * 1024;
 
