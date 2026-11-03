@@ -10,7 +10,7 @@
 #
 # Environment overrides:
 #   RUSTLE_VERSION       release tag to install (default: latest)
-#   RUSTLE_REPO          GitHub repo hosting releases (default: megalabs-dev/rustle)
+#   RUSTLE_REPO          GitHub repo hosting releases (default: megabuild-dev/Rustle)
 #   RUSTLE_BINARY        path to a local rustle binary (skips the download; for testing)
 #   RUSTLE_ADMIN_DOMAIN  dashboard domain (same as --domain)   RUSTLE_ACME_EMAIL  (same as --email)
 #   RUSTLE_ACK_KEY=1     confirm non-interactively that you will save the printed master key
@@ -19,7 +19,7 @@
 #   RUSTLE_INSTALL_DRY_RUN=1    print every step, change nothing
 set -euo pipefail
 
-REPO="${RUSTLE_REPO:-megalabs-dev/rustle}"
+REPO="${RUSTLE_REPO:-megabuild-dev/Rustle}"
 VERSION="${RUSTLE_VERSION:-latest}"
 PROXY_IMAGE="${PROXY_IMAGE:-tecnativa/docker-socket-proxy:0.3.0}"
 CADDY_IMAGE="${CADDY_IMAGE:-caddy:2-alpine}"

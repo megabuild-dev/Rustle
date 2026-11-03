@@ -15,7 +15,7 @@ must stay under 8 MB idle (hard cap 48 MB) on a 1 vCPU / 1 GB VPS. A feature tha
 You need Rust 1.80+ (stable), and for the dashboard `trunk` and the `wasm32-unknown-unknown` target.
 
 ```bash
-git clone https://github.com/megalabs-dev/rustle && cd rustle
+git clone https://github.com/megabuild-dev/Rustle && cd rustle
 cargo test -p rustle-types -p rustle-server        # about 5 s with dependencies optimized
 scripts/build-ui.sh                                # builds the dashboard into ui-dist/
 cargo run -p rustle-server --features dev-fakes    # in-memory Docker/Caddy/GitHub, see docs/DEV.md

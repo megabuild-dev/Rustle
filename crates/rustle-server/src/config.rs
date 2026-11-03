@@ -102,7 +102,7 @@ impl Config {
             network: str_or("RUSTLE_NETWORK", "rustle-net"),
             cgroup_root: path_or("RUSTLE_CGROUP_ROOT", "/sys/fs/cgroup"),
             github_api: str_or("RUSTLE_GITHUB_API", "https://api.github.com"),
-            release_repo: str_or("RUSTLE_RELEASE_REPO", "megalabs-dev/rustle"),
+            release_repo: str_or("RUSTLE_RELEASE_REPO", "megabuild-dev/Rustle"),
             update_pubkey: option_env!("RUSTLE_UPDATE_PUBKEY_HEX").and_then(parse_pubkey),
             bin_dir: state_dir.join("bin"),
             proc_root: path_or("RUSTLE_PROC_ROOT", "/proc"),

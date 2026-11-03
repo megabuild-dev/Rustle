@@ -5,7 +5,7 @@
 #   scripts/github-setup.sh                 # configure, keep the repository private
 #   scripts/github-setup.sh --make-public   # also publish it (cannot be fully undone: forks and caches persist)
 set -euo pipefail
-REPO="${REPO:-megalabs-dev/rustle}"
+REPO="${REPO:-megabuild-dev/Rustle}"
 api() { gh api -H "Accept: application/vnd.github+json" "$@"; }
 
 echo "== description, homepage, features"
