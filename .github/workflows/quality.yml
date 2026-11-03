@@ -14,7 +14,7 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo install cargo-llvm-cov rust-code-analysis-cli --locked
       - run: scripts/quality.sh crap | tee crap.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with: { name: crap, path: crap.txt }
   mutants:
     runs-on: ubuntu-24.04
@@ -26,5 +26,5 @@ jobs:
       - run: cargo install cargo-mutants --locked
       - run: scripts/quality.sh all-mutants
       - if: always()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with: { name: mutants, path: target/mutants/mutants.out }
