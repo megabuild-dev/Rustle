@@ -3,6 +3,11 @@ name = "rustle-ui"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+publish = false
 
 [dependencies]
 rustle-types = { path = "../rustle-types" }

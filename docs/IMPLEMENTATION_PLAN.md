@@ -1,8 +1,8 @@
 # Rustle – Implementation Plan (v1)
 
 Source of truth: PRD and SAD (Claude Docs artifacts, approved 2026-11-01).
-PRD: https://claude.ai/artifact/RfEb9FujTLZR3wWBfDdwwC
-SAD: https://claude.ai/artifact/GCo2xkuBRXUZArR8iNJSuZ
+PRD: product requirements document (kept outside this repository; its decisions are summarised in this plan)
+SAD: software architecture document (kept outside this repository; later changes are in DECISIONS_ADDENDUM.md)
 Goal that overrides everything: **minimum RAM** (admin idle < 8 MB target, hard cap 48 MB).
 
 ## 0. Constraints of the build environment (what can and cannot be verified)

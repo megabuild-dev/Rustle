@@ -1,0 +1,18 @@
+name: Feature request
+description: Suggest an improvement
+labels: [enhancement]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: "What problem are you trying to solve?"
+    validations: {required: true}
+  - type: textarea
+    id: idea
+    attributes:
+      label: "What would you like Rustle to do?"
+  - type: textarea
+    id: memory
+    attributes:
+      label: Memory cost
+      description: Rustle must stay under 8 MB idle. Does this need anything resident, a new dependency, or a background task?

@@ -1,0 +1,17 @@
+name: VPS verification report
+description: Report the result of running items from docs/VERIFY_ON_VPS.md on a real server
+labels: [verification]
+body:
+  - type: input
+    id: items
+    attributes: {label: Items tested, placeholder: "1-12, 33-43"}
+    validations: {required: true}
+  - type: input
+    id: env
+    attributes: {label: Provider, plan and OS, placeholder: "Hetzner CX22, Ubuntu 24.04"}
+    validations: {required: true}
+  - type: textarea
+    id: result
+    attributes:
+      label: "What passed, what failed, what surprised you"
+    validations: {required: true}

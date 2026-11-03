@@ -6,6 +6,9 @@ on:
   pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
@@ -22,6 +25,15 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy -p rustle-types -p rustle-server --all-targets -- -D warnings
       - run: cargo test -p rustle-types -p rustle-server
+
+  deny:
+    name: Licences and advisories (cargo deny)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
 
   crap:
     name: CRAP score gate (every function below 30)

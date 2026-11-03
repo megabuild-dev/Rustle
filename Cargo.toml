@@ -8,6 +8,13 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 rust-version = "1.80"
+authors = ["megalabs-dev and Rustle contributors"]
+description = "Ultra-light self-hosted PaaS for small VPSs: deploy stateless Next.js/Node apps from GHCR images behind Caddy, with the platform itself under 8 MB of RAM."
+repository = "https://github.com/megalabs-dev/rustle"
+homepage = "https://github.com/megalabs-dev/rustle"
+readme = "README.md"
+keywords = ["paas", "self-hosted", "deployment", "caddy", "docker"]
+categories = ["command-line-utilities", "web-programming::http-server"]
 
 [profile.release]
 opt-level = "z"

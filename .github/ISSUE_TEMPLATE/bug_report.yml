@@ -1,0 +1,40 @@
+name: Bug report
+description: Something does not work as documented
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Security problem? Do **not** file it here. Use the private route in SECURITY.md.
+  - type: input
+    id: version
+    attributes: {label: Rustle version, description: Output of `rustle version`}
+    validations: {required: true}
+  - type: input
+    id: os
+    attributes: {label: Server OS and RAM, placeholder: "Ubuntu 24.04, 1 GB"}
+    validations: {required: true}
+  - type: dropdown
+    id: caddy
+    attributes:
+      label: Caddy setup
+      options:
+        - Rustle's own Caddy
+        - Shared with an existing Caddy (host service)
+        - Shared with an existing Caddy (container)
+        - Not sure
+    validations: {required: true}
+  - type: textarea
+    id: what
+    attributes:
+      label: "What happened, and what did you expect?"
+    validations: {required: true}
+  - type: textarea
+    id: steps
+    attributes: {label: Steps to reproduce}
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: "`journalctl -u rustle -n 100`. Remove secrets, tokens and private domains."
+      render: shell
