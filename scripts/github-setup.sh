@@ -24,13 +24,22 @@ api -X PUT "repos/$REPO/topics" \
   -f 'names[]=ghcr' -f 'names[]=github-actions' -f 'names[]=zero-downtime' -f 'names[]=low-memory' \
   -f 'names[]=ci-cd' -f 'names[]=open-source' >/dev/null
 
+if [ "${1:-}" = "--make-public" ]; then
+  # Before protection: branch protection on a private repository needs a paid plan.
+  echo "== making the repository public"
+  api -X PATCH "repos/$REPO" -F private=false >/dev/null
+fi
+
+# Each of these can be refused (plan limits, feature not available); report and continue.
+try() { local what="$1"; shift; if "$@" >/dev/null 2>&1; then echo "   ok: $what"; else echo "   skipped: $what (not available for this repository or plan)"; fi; }
+
 echo "== security features"
-api -X PUT "repos/$REPO/vulnerability-alerts" >/dev/null || true
-api -X PUT "repos/$REPO/automated-security-fixes" >/dev/null || true
-api -X PUT "repos/$REPO/private-vulnerability-reporting" >/dev/null || true
+try "vulnerability alerts" api -X PUT "repos/$REPO/vulnerability-alerts"
+try "automated security fixes" api -X PUT "repos/$REPO/automated-security-fixes"
+try "private vulnerability reporting" api -X PUT "repos/$REPO/private-vulnerability-reporting"
 
 echo "== branch protection for main (after CI has run once, add the job names under required_status_checks)"
-api -X PUT "repos/$REPO/branches/main/protection" --input - >/dev/null <<'JSON'
+try "branch protection" api -X PUT "repos/$REPO/branches/main/protection" --input - <<'JSON'
 {
   "required_status_checks": null,
   "enforce_admins": false,
@@ -41,9 +50,4 @@ api -X PUT "repos/$REPO/branches/main/protection" --input - >/dev/null <<'JSON'
   "allow_deletions": false
 }
 JSON
-
-if [ "${1:-}" = "--make-public" ]; then
-  echo "== making the repository public"
-  api -X PATCH "repos/$REPO" -F private=false >/dev/null
-fi
 echo "done"
