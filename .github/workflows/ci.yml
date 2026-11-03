@@ -61,7 +61,7 @@ jobs:
           components: clippy
       - uses: Swatinem/rust-cache@v2
       - name: Cache installed tools
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: ~/.cargo/bin
           key: tools-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
