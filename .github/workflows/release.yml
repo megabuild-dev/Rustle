@@ -42,7 +42,7 @@ jobs:
           [ -n "$RUSTLE_UPDATE_PUBKEY_HEX" ] || { echo "RUSTLE_UPDATE_PUBKEY_HEX variable is not set"; exit 1; }
           cargo build --release -p rustle-server
           cp target/release/rustle "rustle-${{ matrix.arch }}-linux"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: rustle-${{ matrix.arch }}
           path: rustle-${{ matrix.arch }}-linux
