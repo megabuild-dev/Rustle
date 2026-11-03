@@ -56,3 +56,9 @@ scripts/quality.sh crap          # every function must have CRAP score < 30
 
 Use the bug template. Include the Rustle version (`rustle version`), Ubuntu version, whether Caddy is Rustle's own or
 shared, and the relevant lines of `journalctl -u rustle`. Remove secrets first.
+
+## For maintainers
+
+`scripts/github-setup.sh` configures the repository once: description, search topics, default branch `main`, security
+alerts, private vulnerability reporting and branch protection. After the first green CI run, add the job names
+(`server`, `ui`, `deny`, `crap`, ...) as required status checks.
