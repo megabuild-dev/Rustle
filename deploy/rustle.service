@@ -1,6 +1,6 @@
 [Unit]
 Description=Rustle admin (ultra-light PaaS)
-Documentation=https://github.com/megalabs-dev/rustle
+Documentation=https://github.com/megabuild-dev/Rustle
 After=docker.service network-online.target
 Wants=docker.service network-online.target
 

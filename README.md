@@ -1,11 +1,14 @@
 <div align="center">
 
-# Rustle
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-horizontal-dark.svg">
+  <img src="assets/brand/logo-horizontal.svg" alt="Rustle" height="84">
+</picture>
 
 **An ultra-light, self-hosted PaaS for small VPSs.**
 Build on GitHub Actions, deploy to your own server, keep the platform itself under 8 MB of RAM.
 
-[![CI](https://github.com/megalabs-dev/rustle/actions/workflows/ci.yml/badge.svg)](https://github.com/megalabs-dev/rustle/actions/workflows/ci.yml)
+[![CI](https://github.com/megabuild-dev/Rustle/actions/workflows/ci.yml/badge.svg)](https://github.com/megabuild-dev/Rustle/actions/workflows/ci.yml)
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
 ![Idle RAM](https://img.shields.io/badge/idle%20RAM-5.8%20MB-brightgreen)
 ![Binary](https://img.shields.io/badge/binary-5%20MB-brightgreen)
@@ -72,7 +75,7 @@ Screenshots come from the headless-browser test (`scripts/ui_e2e.js`) running ag
 Ubuntu 22.04 / 24.04, as root on the VPS:
 
 ```bash
-curl -fsSL https://github.com/megalabs-dev/rustle/releases/latest/download/rustle-installer.tar.gz | tar xz
+curl -fsSL https://github.com/megabuild-dev/Rustle/releases/latest/download/rustle-installer.tar.gz | tar xz
 sudo ./install/install.sh --domain admin.example.com --email you@example.com
 ```
 
@@ -93,7 +96,7 @@ GitHub secret, and push.
 ## Build from source
 
 ```bash
-git clone https://github.com/megalabs-dev/rustle && cd rustle
+git clone https://github.com/megabuild-dev/Rustle && cd rustle
 scripts/build-ui.sh                     # dashboard -> ui-dist/ (needs trunk and the wasm32 target)
 cargo build --release -p rustle-server  # target/release/rustle
 cargo test -p rustle-types -p rustle-server
@@ -120,6 +123,11 @@ cargo test -p rustle-types -p rustle-server
 | Test quality: CRAP score and mutation testing | [docs/QUALITY.md](docs/QUALITY.md) |
 | Releasing and signing | [docs/RELEASING.md](docs/RELEASING.md) |
 | Implementation plan and design changes | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), [docs/DECISIONS_ADDENDUM.md](docs/DECISIONS_ADDENDUM.md) |
+
+## Brand
+
+The logo is a leaf lifted by the wind: light enough to ride on a 1 GB server. The name is the sound leaves make. Logo, icons
+and the social preview are in [assets/brand](assets/brand) (MIT, like the rest of the project).
 
 ## Contributing
 

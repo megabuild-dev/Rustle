@@ -8,7 +8,7 @@ variables, and sits in front of your sites. Security reports are taken seriously
 **Do not open a public issue.** Use GitHub's private reporting instead:
 
 1. Go to the repository's **Security** tab, then **Report a vulnerability**
-   (<https://github.com/megalabs-dev/rustle/security/advisories/new>).
+   (<https://github.com/megabuild-dev/Rustle/security/advisories/new>).
 2. Describe what you found, how to reproduce it, and the impact you expect.
 
 You will get a first answer within **3 working days**. We aim to ship a fix within **30 days** for high-severity issues

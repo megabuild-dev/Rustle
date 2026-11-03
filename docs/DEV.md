@@ -41,7 +41,7 @@ Use the same topology as production, never a mounted `docker.sock`:
 | `RUSTLE_NETWORK` | `rustle-net` | Docker network created by the installer |
 | `RUSTLE_PUBLIC_IP` / `RUSTLE_ADMIN_DOMAIN` / `RUSTLE_ACME_EMAIL` | none | read by `rustle init` |
 | `RUSTLE_CGROUP_ROOT`, `RUSTLE_PROC_ROOT` | `/sys/fs/cgroup`, `/proc` | overridable for tests |
-| `RUSTLE_GITHUB_API`, `RUSTLE_RELEASE_REPO` | `https://api.github.com`, `megalabs-dev/rustle` | backups and updates |
+| `RUSTLE_GITHUB_API`, `RUSTLE_RELEASE_REPO` | `https://api.github.com`, `megabuild-dev/Rustle` | backups and updates |
 | `RUST_LOG` | `info` | `error`, `warn`, `info`, `debug`, `trace` |
 
 ## CLI

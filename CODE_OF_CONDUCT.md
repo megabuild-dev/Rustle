@@ -29,7 +29,7 @@ Maintainers may remove, edit or reject comments, commits, issues and other contr
 and may temporarily or permanently ban a contributor for behaviour they judge harmful.
 
 To report a problem, open a private security advisory at
-<https://github.com/megalabs-dev/rustle/security/advisories/new> and write "conduct" in the title, or contact a maintainer
+<https://github.com/megabuild-dev/Rustle/security/advisories/new> and write "conduct" in the title, or contact a maintainer
 directly through GitHub. Reports are handled confidentially and reviewed promptly and fairly.
 
 This code applies in all project spaces (issues, pull requests, discussions) and when someone represents the project

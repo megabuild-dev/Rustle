@@ -1,0 +1,32 @@
+<!doctype html><meta charset="utf-8">
+<style>
+  html,body{margin:0;background:#0b1020}
+  .card{position:relative;width:1280px;height:640px;overflow:hidden;font-family:"Inter",system-ui,sans-serif;color:#f1f5f9;
+    background:radial-gradient(900px 520px at 88% 8%,rgba(52,211,153,.20),transparent 60%),radial-gradient(700px 420px at 0% 100%,rgba(94,234,212,.08),transparent 60%),#0b1020}
+  .wind{position:absolute;inset:0}
+  .mark{position:absolute;right:92px;top:92px;width:400px;height:400px;filter:drop-shadow(0 30px 60px rgba(16,185,129,.28))}
+  .copy{position:absolute;left:84px;top:0;bottom:0;display:flex;flex-direction:column;justify-content:center;gap:26px;width:700px}
+  .word{font-weight:800;font-size:132px;letter-spacing:-.035em;line-height:1}
+  .tag{font-size:42px;line-height:1.22;font-weight:600;letter-spacing:-.015em}
+  .tag em{font-style:normal;color:#34d399}
+  .sub{font-size:25px;line-height:1.4;color:#94a3b8;font-weight:450;max-width:620px}
+  .chips{display:flex;gap:12px;margin-top:6px}
+  .chips span{font:600 19px/1 "Inter",sans-serif;color:#cbd5e1;border:1.5px solid #243049;border-radius:999px;padding:11px 18px;background:rgba(15,23,41,.7)}
+  .url{position:absolute;left:84px;bottom:40px;font:500 20px "Inter",sans-serif;color:#64748b;letter-spacing:.01em}
+</style>
+<div class="card">
+  <svg class="wind" viewBox="0 0 1280 640" fill="none" stroke="#34d399" stroke-linecap="round">
+    <path d="M700 120 C820 96 900 140 1010 112" stroke-width="3" opacity=".16"/>
+    <path d="M640 210 C760 188 830 232 930 206" stroke-width="3" opacity=".12"/>
+    <path d="M760 520 C860 500 930 540 1040 514" stroke-width="3" opacity=".12"/>
+    <path d="M820 585 C900 570 950 600 1030 580" stroke-width="3" opacity=".09"/>
+  </svg>
+  <div class="mark">__MARK__</div>
+  <div class="copy">
+    <div class="word">Rustle</div>
+    <div class="tag">Deploy on a 1&nbsp;GB VPS.<br><em>The platform stays under 8The platform uses 8&nbsp;MB.nbsp;MB.</em></div>
+    <div class="sub">Self-hosted PaaS for stateless Next.js and Node apps. Build on GitHub Actions, serve behind Caddy.</div>
+    <div class="chips"><span>Rust</span><span>Caddy</span><span>Docker</span><span>MIT</span></div>
+  </div>
+  <div class="url">github.com/megabuild-dev/Rustle</div>
+</div>
