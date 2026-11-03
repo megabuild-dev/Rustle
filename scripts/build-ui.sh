@@ -12,7 +12,7 @@ trap 'rm -rf "$OUT"' EXIT
 
 # Keep the committed placeholder out of the way, stage the real build.
 find ui-dist -mindepth 1 ! -name '.gitkeep' -delete
-cp "$OUT"/*.js "$OUT"/*.wasm "$OUT"/*.css ui-dist/
+cp "$OUT"/*.js "$OUT"/*.wasm "$OUT"/*.css "$OUT"/*.svg ui-dist/
 # The page is served with a strict CSP (no inline scripts): move Trunk's inline bootstrap into boot.js.
 python3 - "$OUT/index.html" ui-dist <<'PY'
 import re, sys, pathlib

@@ -1,6 +1,9 @@
 <div align="center">
 
-# Rustle
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/brand/logo-horizontal-dark.svg">
+  <img src="assets/brand/logo-horizontal.svg" alt="Rustle" height="84">
+</picture>
 
 **An ultra-light, self-hosted PaaS for small VPSs.**
 Build on GitHub Actions, deploy to your own server, keep the platform itself under 8 MB of RAM.
@@ -120,6 +123,11 @@ cargo test -p rustle-types -p rustle-server
 | Test quality: CRAP score and mutation testing | [docs/QUALITY.md](docs/QUALITY.md) |
 | Releasing and signing | [docs/RELEASING.md](docs/RELEASING.md) |
 | Implementation plan and design changes | [docs/IMPLEMENTATION_PLAN.md](docs/IMPLEMENTATION_PLAN.md), [docs/DECISIONS_ADDENDUM.md](docs/DECISIONS_ADDENDUM.md) |
+
+## Brand
+
+The logo is a leaf lifted by the wind: light enough to ride on a 1 GB server. The name is the sound leaves make. Logo, icons
+and the social preview are in [assets/brand](assets/brand) (MIT, like the rest of the project).
 
 ## Contributing
 
